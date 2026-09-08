@@ -154,6 +154,7 @@ DASHBOARD_PAGE = """
   <h2>Status:
     <span class="pill {{ 'active' if status=='active' else 'inactive' }}">{{ status }}</span>
     {% if live_mode %}<span class="pill inactive">LIVE — real money</span>{% else %}<span class="pill active">PAPER — no real money</span>{% endif %}
+    {% if schema_verified %}<span class="pill active">Order schema verified</span>{% else %}<span class="pill inactive">Order schema NOT verified</span>{% endif %}
   </h2>
   <p>Bankroll (last known): ${{ "%.2f"|format(bankroll/100) }}</p>
   <form method="post" action="/control" style="display:inline;">
@@ -312,15 +313,34 @@ DASHBOARD_PAGE = """
 </div>
 
 <div class="card">
+  <h2>Order schema verification</h2>
+  <p>Confirms create_order()/cancel_order() have been tested against a real order round-trip on Kalshi's demo API. Required before live trading can be enabled — see kalshi_client.py's create_order() docstring for why.</p>
+  {% if schema_verified %}
+    <p>Status: verified.</p>
+    <form method="post" action="/verify_schema">
+      <button type="submit" name="action" value="off" class="secondary">Mark unverified</button>
+    </form>
+  {% else %}
+    <p>Status: not verified. Test create_order()/cancel_order() against the demo API (a full buy-then-cancel round trip) before flipping this on.</p>
+    <form method="post" action="/verify_schema">
+      <button type="submit" name="action" value="on">Mark schema verified</button>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2 class="warn">Go live (real money)</h2>
   <p>Only do this after running in paper mode for a while and checking the trades table above.</p>
+  {% if not schema_verified and not live_mode %}
+    <p class="warn">Order schema must be verified (above) before live trading can be enabled.</p>
+  {% endif %}
   <form method="post" action="/golive">
     {% if live_mode %}
       <button type="submit" name="action" value="off">Switch back to paper mode</button>
     {% else %}
       <label>Type exactly: I ACCEPT THE RISK</label>
       <input type="text" name="confirm">
-      <button type="submit" name="action" value="on" class="danger">Enable live trading</button>
+      <button type="submit" name="action" value="on" class="danger" {{ 'disabled' if not schema_verified else '' }}>Enable live trading</button>
     {% endif %}
   </form>
 </div>
@@ -420,6 +440,7 @@ def dashboard():
         risk_mode=env.get("RISK_MODE", "balanced"),
         bankroll_dollars=int(env.get("STARTING_BANKROLL_CENTS", "50000")) // 100,
         series=env.get("SERIES_TICKERS", "KXRAIN"),
+        schema_verified=env.get("ORDER_SCHEMA_VERIFIED", "false").lower() == "true",
         message=request.args.get("message"),
     )
 
@@ -495,11 +516,33 @@ def control():
     return redirect(url_for("dashboard", message=msg))
 
 
+@app.route("/verify_schema", methods=["POST"])
+def verify_schema():
+    env = read_env()
+    action = request.form.get("action")
+    if action == "on":
+        env["ORDER_SCHEMA_VERIFIED"] = "true"
+        msg = "Order schema marked verified. Live trading can now be enabled."
+    else:
+        env["ORDER_SCHEMA_VERIFIED"] = "false"
+        msg = "Order schema marked unverified."
+        # Verification is a prerequisite for live trading — pulling it back
+        # also pulls live trading back to paper mode, so the two flags can
+        # never end up out of sync (verified=false, live=true).
+        env["LIVE_TRADING"] = "false"
+        env["LIVE_TRADING_CONFIRMED"] = "false"
+    write_env(env)
+    restart_bot()
+    return redirect(url_for("dashboard", message=msg))
+
+
 @app.route("/golive", methods=["POST"])
 def golive():
     env = read_env()
     action = request.form.get("action")
     if action == "on":
+        if env.get("ORDER_SCHEMA_VERIFIED", "false").lower() != "true":
+            return redirect(url_for("dashboard", message="Order schema isn't marked verified yet — do that first."))
         if request.form.get("confirm", "").strip() != "I ACCEPT THE RISK":
             return redirect(url_for("dashboard", message="Confirmation phrase didn't match — nothing changed."))
         env["LIVE_TRADING"] = "true"
