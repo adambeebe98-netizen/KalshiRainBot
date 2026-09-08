@@ -71,7 +71,7 @@ def service_status() -> str:
     return result.stdout.strip()
 
 
-def tail_log(n: int = 40) -> str:
+def tail_log(n: int = 200) -> str:
     if not LOG_PATH.exists():
         return "(no log file yet — the bot hasn't started successfully)"
     lines = LOG_PATH.read_text(errors="replace").splitlines()
@@ -238,6 +238,18 @@ DASHBOARD_PAGE = """
   </div>
   {% endfor %}
   {% if not category_summary %}<p style="color:#8b949e;">No settled trades yet — categories will appear once shadow trades resolve.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Why isn't it trading? <span style="font-size:12px;color:#8b949e;">(last 24h, main bot's decision gate — every scanned market lands in exactly one of these buckets)</span></h2>
+  <p>{{ decision_summary.counts.total }} markets evaluated — {{ decision_summary.counts.traded }} traded, {{ decision_summary.counts.skipped }} skipped.</p>
+  <table>
+    <tr><th>Skip reason</th><th>Count</th></tr>
+    {% for reason, count in decision_summary.skip_reasons.items() %}
+    <tr><td>{{ reason }}</td><td>{{ count }}</td></tr>
+    {% endfor %}
+    {% if not decision_summary.skip_reasons %}<tr><td colspan="2">No skips logged in the last 24h.</td></tr>{% endif %}
+  </table>
 </div>
 
 <div class="card">
@@ -452,6 +464,7 @@ def dashboard():
     chart_data = {}
     category_pnl_history = {}
     open_markets = []
+    decision_summary = {"counts": {"traded": 0, "skipped": 0, "total": 0}, "skip_reasons": {}}
     try:
         shadow_summary = storage.get_shadow_summary()
         category_summary = storage.get_shadow_summary_by_category()
@@ -460,6 +473,7 @@ def dashboard():
             if history:
                 chart_data[name] = [[ts, cents] for ts, cents in history]
         category_pnl_history = storage.get_category_pnl_over_time()
+        decision_summary = storage.get_decision_summary(hours=24)
         now = int(time.time())
         for m in storage.get_current_open_markets():
             age_s = now - m["ts"]
@@ -482,6 +496,7 @@ def dashboard():
         chart_data=chart_data,
         category_pnl_history=category_pnl_history,
         open_markets=open_markets,
+        decision_summary=decision_summary,
         suggestions=storage.get_suggestions(status="pending"),
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
