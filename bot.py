@@ -40,7 +40,7 @@ from config import SETTINGS
 from kalshi_client import KalshiClient
 from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
-from strategy import evaluate_market, evaluate_temperature_market
+from strategy import evaluate_market, evaluate_temperature_market, pick_relevant_forecast_temp_f
 from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE
 import depth_sizing
 import fees
@@ -176,8 +176,16 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             # signals for temperature markets).
             if rules.measure in ("precipitation_daily", "precipitation_monthly"):
                 signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
+                current_forecast_temp_f = previous_forecast_temp_f = None
             elif rules.measure in ("temperature_high", "temperature_low"):
                 signal = evaluate_temperature_market(ticker, yes_price, rules, observation, forecast)
+                # For temp_forecast_momentum (see shadow.py): grab the
+                # previous cycle's logged forecast BEFORE overwriting it with
+                # this cycle's, so the comparison is "did it move since last
+                # time," not "compared to itself."
+                current_forecast_temp_f = pick_relevant_forecast_temp_f(rules.measure, forecast)
+                previous_forecast_temp_f = storage.get_previous_forecast_temp_f(ticker)
+                storage.log_forecast_snapshot(ticker, current_forecast_temp_f)
             else:
                 storage.log_decision(ticker, "n/a", yes_price, 0.5, 0, "skipped",
                                       f"no model for measure={rules.measure!r}", mode)
@@ -186,7 +194,10 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             # Every shadow strategy (see shadow.py / strategies_lib.py) gets a
             # look at this same market, independent of what the ACTIVE bot
             # decides below — always paper, never a real order.
-            shadow.evaluate_and_log(ticker, signal, yes_price, no_ask, rules.station_code, rules.measure)
+            shadow.evaluate_and_log(ticker, signal, yes_price, no_ask, rules.station_code, rules.measure,
+                                     confidence=rules.confidence,
+                                     current_forecast_temp_f=current_forecast_temp_f,
+                                     previous_forecast_temp_f=previous_forecast_temp_f)
 
             approved, reason = risk.approve_trade(
                 price_cents=(yes_price if signal.side == "yes" else 100 - yes_price),
