@@ -353,7 +353,15 @@ def get_shadow_bankroll_history(strategy: str, limit: int = 300) -> list[tuple[i
 
 
 def get_shadow_summary() -> list[dict]:
-    """One row per strategy: settled count, win rate, total pnl, current bankroll."""
+    """
+    One row per strategy: settled count, win rate, total pnl, current
+    bankroll, ROI% (comparable across strategies since they all start from
+    the same SETTINGS.starting_bankroll_cents), and days_tracked (time since
+    that strategy's first bankroll snapshot). Sorted best-to-worst by total
+    P&L (equivalent to sorting by ROI% here, since the starting bankroll is
+    shared) so the dashboard/export show a ranked leaderboard, not an
+    arbitrary DISTINCT-query order.
+    """
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         strategies = [r["strategy"] for r in conn.execute("SELECT DISTINCT strategy FROM shadow_bankroll_snapshots")]
@@ -367,15 +375,25 @@ def get_shadow_summary() -> list[dict]:
             bankroll_row = conn.execute(
                 "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC LIMIT 1", (s,)
             ).fetchone()
+            first_ts_row = conn.execute(
+                "SELECT MIN(ts) as first_ts FROM shadow_bankroll_snapshots WHERE strategy=?", (s,)
+            ).fetchone()
             n = settled["n"] or 0
+            total_pnl = settled["total_pnl"] or 0
+            first_ts = first_ts_row["first_ts"] if first_ts_row else None
             summary.append({
                 "strategy": s,
                 "settled": n,
                 "wins": settled["wins"] or 0,
                 "win_rate": (settled["wins"] or 0) / n if n else None,
-                "total_pnl_cents": settled["total_pnl"] or 0,
+                "total_pnl_cents": total_pnl,
                 "bankroll_cents": bankroll_row["bankroll_cents"] if bankroll_row else None,
+                "roi_pct": (total_pnl / SETTINGS.starting_bankroll_cents * 100) if SETTINGS.starting_bankroll_cents else None,
+                "days_tracked": max(0, (time.time() - first_ts) / 86400) if first_ts else None,
             })
+        summary.sort(key=lambda row: row["total_pnl_cents"], reverse=True)
+        for i, row in enumerate(summary, start=1):
+            row["rank"] = i
         return summary
 
 
