@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from config import SETTINGS
+import fees
 
 
 @dataclass
@@ -78,7 +79,7 @@ class RiskManager:
         max_risk_cents = int(self.state.bankroll_cents * self.preset.max_position_pct)
         return max(0, max_risk_cents // price_cents)
 
-    def approve_trade(self, price_cents: int, edge_cents: int) -> tuple[bool, str]:
+    def approve_trade(self, price_cents: int, edge_cents: int, edge_already_net_of_fees: bool = False) -> tuple[bool, str]:
         today = date.today()
         self.state.roll_day_if_needed(today)
 
@@ -98,6 +99,25 @@ class RiskManager:
         contracts = self.max_contracts_for_trade(price_cents)
         if contracts < 1:
             return False, "position size rounds to 0 contracts under max_position_pct"
+
+        if edge_already_net_of_fees:
+            # Caller (e.g. a multi-order strategy like bracket arbitrage,
+            # where the true fee is a sum across several separately-priced
+            # orders, not one) has already computed real fees correctly and
+            # baked them into edge_cents — applying the generic single-order
+            # fee formula on top here would double-count or misstate it.
+            return True, "approved"
+
+        # Fee-awareness — a trade whose modeled edge doesn't survive real
+        # Kalshi fees isn't actually a trade worth making, no matter how
+        # good the raw edge_cents number looks. This check applies to
+        # EVERY strategy through this one shared function, not just the
+        # ones that were built with fees in mind from the start.
+        fee_cents = fees.taker_fee_cents(contracts, price_cents)
+        gross_expected_cents = edge_cents * contracts
+        if gross_expected_cents - fee_cents <= 0:
+            return False, (f"edge doesn't survive real fees: gross {gross_expected_cents}c "
+                            f"- fee {fee_cents}c = {gross_expected_cents - fee_cents}c")
 
         return True, "approved"
 
