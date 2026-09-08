@@ -28,12 +28,18 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
 
     # One settlement check per unique ticker, shared between real trades and
     # every shadow strategy — so having 6+ shadow strategies doesn't mean 6x
-    # the API calls. bracket_arbitrage trades store a SYNTHETIC event ticker
-    # in `ticker` (not a real market — see shadow.evaluate_bracket_set), so
-    # they contribute their `sample_member_ticker` here instead, which IS a
-    # real, pollable market ticker.
+    # the API calls. LEGACY bracket_arbitrage rows (from before the
+    # per-leg refactor — see shadow.evaluate_bracket_set) store a SYNTHETIC
+    # event ticker in `ticker` (not a real market) and need their
+    # `sample_member_ticker` instead, which IS a real, pollable ticker.
+    # Current-style bracket_arbitrage rows already have a real ticker
+    # directly in `ticker` (each row is one real bracket leg now), same as
+    # every other strategy — sample_member_ticker is None for those, so the
+    # `and t["sample_member_ticker"]` guard below falls through to the
+    # normal `t["ticker"]` case correctly.
     real_shadow_tickers = {
-        (t["sample_member_ticker"] if t["strategy"] == "bracket_arbitrage" else t["ticker"])
+        (t["sample_member_ticker"] if t["strategy"] == "bracket_arbitrage" and t["sample_member_ticker"]
+         else t["ticker"])
         for t in open_shadow
     }
     real_shadow_tickers.discard(None)
@@ -86,7 +92,12 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
 
     bracket_settled = shadow.settle_bracket_arbitrage(checked)
     if bracket_settled:
-        log.info(f"Settled {bracket_settled} bracket-arbitrage set(s) this cycle.")
+        log.info(f"Settled {bracket_settled} legacy bracket-arbitrage set(s) this cycle.")
+
+    bracket_offloaded = shadow.check_bracket_arbitrage_offload()
+    if bracket_offloaded:
+        log.info(f"Offloaded {bracket_offloaded} bracket-arbitrage leg(s) early this cycle "
+                 f"(sold below entry price, above zero, rather than holding to settlement).")
 
     shadow_settled = shadow.settle(checked)
     shadow.snapshot_all()
