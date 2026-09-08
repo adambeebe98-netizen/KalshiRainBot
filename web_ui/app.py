@@ -35,6 +35,7 @@ SERVICE_NAME = "kalshi-weather-bot"
 sys.path.insert(0, str(APP_DIR))
 import storage  # noqa: E402
 import shadow  # noqa: E402
+import reporting  # noqa: E402
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -146,7 +147,7 @@ a { color:#58a6ff; }
 DASHBOARD_PAGE = """
 <!doctype html><html><head><title>Kalshi Bot Dashboard</title><style>{{ css }}</style></head><body style="max-width:900px;margin:0 auto;padding:20px;">
 
-<h1>Kalshi Weather Bot <span style="float:right;font-size:14px;"><a href="/logout">Log out</a></span></h1>
+<h1>Kalshi Weather Bot <span style="float:right;font-size:14px;"><a href="/export">Export data</a> &nbsp;|&nbsp; <a href="/logout">Log out</a></span></h1>
 
 <div class="card">
   <h2>Status:
@@ -212,6 +213,27 @@ DASHBOARD_PAGE = """
     {% endfor %}
     {% if not calibration_rows %}<tr><td colspan="6">No calibration data yet — needs settled trades.</td></tr>{% endif %}
   </table>
+</div>
+
+<div class="card">
+  <h2>Suggestions <span style="font-size:12px;color:#8b949e;">(Claude's weekly review of swing/favorites/longshot thresholds — nothing changes until you click Apply)</span></h2>
+  {% for s in suggestions %}
+  <div style="border:1px solid #30363d;border-radius:6px;padding:12px;margin-bottom:10px;">
+    <strong>{{ s.strategy }}.{{ s.param }}</strong>: {{ s.current_value }} → {{ s.suggested_value }}
+    <p style="color:#8b949e;margin:6px 0;">{{ s.rationale }}</p>
+    <form method="post" action="/suggestion" style="display:inline;">
+      <input type="hidden" name="id" value="{{ s.id }}">
+      <input type="hidden" name="action" value="apply">
+      <button type="submit">Apply</button>
+    </form>
+    <form method="post" action="/suggestion" style="display:inline;">
+      <input type="hidden" name="id" value="{{ s.id }}">
+      <input type="hidden" name="action" value="dismiss">
+      <button type="submit" class="secondary">Dismiss</button>
+    </form>
+  </div>
+  {% endfor %}
+  {% if not suggestions %}<p style="color:#8b949e;">No pending suggestions right now — check back after the next weekly review, or once more trades have settled.</p>{% endif %}
 </div>
 
 <div class="card">
@@ -341,6 +363,7 @@ def dashboard():
         calibration_rows=calibration_rows,
         shadow_summary=shadow_summary,
         chart_data=chart_data,
+        suggestions=storage.get_suggestions(status="pending"),
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
@@ -349,6 +372,31 @@ def dashboard():
         series=env.get("SERIES_TICKERS", "KXRAIN"),
         message=request.args.get("message"),
     )
+
+
+@app.route("/suggestion", methods=["POST"])
+def suggestion_action():
+    """The ONLY place in the whole app that ever calls storage.set_override().
+    advisor.py can write suggestions; only a human clicking this button can
+    turn one into an actual running change."""
+    suggestion_id = int(request.form["id"])
+    action = request.form.get("action")
+
+    pending = storage.get_suggestions(status="pending")
+    match = next((s for s in pending if s["id"] == suggestion_id), None)
+    if not match:
+        return redirect(url_for("dashboard", message="Suggestion not found (already handled?)."))
+
+    if action == "apply":
+        storage.set_override(match["strategy"], match["param"], match["suggested_value"])
+        storage.update_suggestion_status(suggestion_id, "applied")
+        restart_bot()
+        msg = f"Applied: {match['strategy']}.{match['param']} = {match['suggested_value']}. Bot restarted."
+    else:
+        storage.update_suggestion_status(suggestion_id, "dismissed")
+        msg = "Suggestion dismissed."
+
+    return redirect(url_for("dashboard", message=msg))
 
 
 @app.route("/setup", methods=["POST"])
@@ -414,6 +462,22 @@ def golive():
     write_env(env)
     restart_bot()
     return redirect(url_for("dashboard", message=msg))
+
+
+EXPORT_PAGE = """
+<!doctype html><html><head><title>Export data</title><style>{{ css }}</style></head><body style="max-width:900px;margin:0 auto;padding:20px;">
+<h1>Export <span style="float:right;font-size:14px;"><a href="/">Back to dashboard</a></span></h1>
+<p style="color:#8b949e;">Copy everything in the box below and paste it into your chat with Claude when you want to talk through what's actually happening.</p>
+<textarea readonly style="height:600px;font-family:monospace;font-size:12px;" onclick="this.select()">{{ export_text }}</textarea>
+</body></html>
+"""
+
+
+@app.route("/export")
+def export_data():
+    env = read_env()
+    export_text = reporting.build_export_text(env)
+    return render_template_string(EXPORT_PAGE, css=CSS, export_text=export_text)
 
 
 if __name__ == "__main__":
