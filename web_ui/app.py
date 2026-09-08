@@ -257,8 +257,9 @@ DASHBOARD_PAGE = """
   <table>
     <tr><th>Ticker</th><th>Yes ask</th><th>Yes bid</th><th>No ask (implied)</th><th>Last seen</th></tr>
     {% for m in open_markets %}
-    <tr><td>{{ m.ticker }}</td><td>{{ m.yes_ask }}c</td><td>{{ m.yes_bid }}c</td>
-        <td>{{ (100 - m.yes_bid) if m.yes_bid is not none else '—' }}c</td>
+    <tr><td>{{ m.ticker }}</td><td>{{ (m.yes_ask ~ 'c') if m.yes_ask is not none else '— (no live ask)' }}</td>
+        <td>{{ (m.yes_bid ~ 'c') if m.yes_bid is not none else '—' }}</td>
+        <td>{{ ((100 - m.yes_bid) ~ 'c') if m.yes_bid is not none else '—' }}</td>
         <td>{{ m.last_seen }}</td></tr>
     {% endfor %}
     {% if not open_markets %}<tr><td colspan="5">No markets scanned yet this cycle.</td></tr>{% endif %}
