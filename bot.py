@@ -90,17 +90,48 @@ def confirm_live_trading() -> bool:
 
 
 def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
-                    risk: RiskManager, live: bool) -> None:
+                    risk: RiskManager, live: bool, series_tickers: tuple[str, ...]) -> None:
     mode = "live" if live else "paper"
 
-    for series_ticker in SETTINGS.series_tickers:
+    for series_ticker in series_tickers:
+        found = []
+        cursor = None
         try:
-            markets_resp = kalshi.get_markets(series_ticker=series_ticker, status="open")
+            for _ in range(10):  # safety cap on pagination
+                markets_resp = kalshi.get_markets(series_ticker=series_ticker, status="open", cursor=cursor)
+                found.extend(markets_resp.get("markets", []))
+                cursor = markets_resp.get("cursor")
+                if not cursor:
+                    break
         except Exception as e:
             log.error(f"Failed to fetch markets for {series_ticker}: {e}")
             continue
 
-        for market in markets_resp.get("markets", []):
+        # This is the actual proof of how many individual markets (cities,
+        # for KXRAIN) came back for this one series — check this line in
+        # the log/dashboard to confirm multiple cities are really coming
+        # through, rather than assuming it from the API structure.
+        log.info(f"Series {series_ticker}: {len(found)} open market(s) — "
+                 f"{[m['ticker'] for m in found][:15]}{'...' if len(found) > 15 else ''}")
+
+        # Group by event so bracket_arbitrage can evaluate each full set of
+        # mutually-exclusive brackets together — it needs ALL of a day's
+        # brackets for one city at once, not one market at a time like every
+        # other strategy. This runs once per event per cycle, independent of
+        # the per-market loop below.
+        by_event: dict[str, list[dict]] = {}
+        for market in found:
+            event_ticker = market.get("event_ticker")
+            if event_ticker:
+                by_event.setdefault(event_ticker, []).append(market)
+        for event_ticker, event_markets in by_event.items():
+            if len(event_markets) >= 2:  # a "bracket set" needs at least 2 mutually-exclusive options
+                try:
+                    shadow.evaluate_bracket_set(event_ticker, event_markets)
+                except Exception as e:
+                    log.warning(f"Bracket arbitrage evaluation failed for {event_ticker}: {e}")
+
+        for market in found:
             ticker = market["ticker"]
             yes_price = market.get("yes_ask") or market.get("last_price")
             if not yes_price:
@@ -184,6 +215,41 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             risk.record_fill(cost_cents=contracts * price)
 
 
+def get_series_tickers(kalshi: KalshiClient, cache: dict) -> tuple[str, ...]:
+    """
+    Returns the current list of series to scan, refreshing via live
+    discovery at most once per DISCOVERY_REFRESH_SECONDS (a series list
+    changes rarely — no need to hit /series every 5-minute cycle). Falls
+    back to the configured SERIES_TICKERS if discovery is off or fails,
+    so a Kalshi API hiccup never leaves the bot scanning nothing.
+    `cache` is a small dict the caller keeps across calls: {'tickers':..., 'ts':...}
+    """
+    if not SETTINGS.auto_discover_series:
+        return SETTINGS.series_tickers
+
+    now = time.time()
+    if cache.get("tickers") and (now - cache.get("ts", 0)) < SETTINGS.discovery_refresh_seconds:
+        return cache["tickers"]
+
+    try:
+        discovered: set[str] = set()
+        for keyword in SETTINGS.discovery_keywords:
+            discovered.update(kalshi.discover_series_tickers(keyword))
+        if discovered:
+            result = tuple(sorted(discovered))
+            log.info(f"Discovered {len(result)} series matching {SETTINGS.discovery_keywords}: {result}")
+            cache["tickers"] = result
+            cache["ts"] = now
+            return cache["tickers"]
+        else:
+            log.warning(f"Series discovery found nothing matching {SETTINGS.discovery_keywords} — "
+                        f"falling back to configured SERIES_TICKERS: {SETTINGS.series_tickers}")
+    except Exception as e:
+        log.warning(f"Series discovery failed ({e}) — falling back to configured SERIES_TICKERS: {SETTINGS.series_tickers}")
+
+    return cache.get("tickers") or SETTINGS.series_tickers
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="Enable live order placement")
@@ -194,6 +260,16 @@ def main():
     if live:
         if not SETTINGS.live_trading_enabled:
             log.error("LIVE_TRADING is not set to true in your .env — refusing to trade live.")
+            sys.exit(1)
+        if not SETTINGS.order_schema_verified:
+            log.error(
+                "create_order() targets a Kalshi order schema that has NOT been verified "
+                "against the current live API (multiple sources report the old integer-cents "
+                "order endpoint was deprecated mid-2026 — see kalshi_client.py's create_order "
+                "docstring). Real orders may fail or behave unexpectedly. Set "
+                "ORDER_SCHEMA_VERIFIED=true in .env only after confirming a real test order "
+                "works, or ask for this to be fixed first."
+            )
             sys.exit(1)
         if not confirm_live_trading():
             log.info("Live trading not confirmed. Exiting.")
@@ -221,8 +297,10 @@ def main():
 
     log.info(f"Starting bot in {'LIVE' if live else 'PAPER'} mode, risk profile '{SETTINGS.risk_mode}'. "
              f"Bankroll: ${risk.state.bankroll_cents/100:.2f}, "
-             f"scanning series: {SETTINGS.series_tickers}")
+             f"auto-discover series: {SETTINGS.auto_discover_series} (keywords={SETTINGS.discovery_keywords})")
 
+    advisor_interval = getattr(SETTINGS, "advisor_interval_seconds", 7 * 24 * 3600)
+    series_cache: dict = {}
     consecutive_failures = 0
     while True:
         try:
@@ -233,8 +311,21 @@ def main():
             if settled:
                 log.info(f"Settled {settled} resolved trade(s) this cycle.")
 
-            scan_and_trade(kalshi, extractor, risk, live)
+            current_series = get_series_tickers(kalshi, series_cache)
+            scan_and_trade(kalshi, extractor, risk, live, current_series)
             storage.snapshot_bankroll(risk.state.bankroll_cents, note="cycle complete")
+
+            # Weekly (by default) Claude-based review — writes suggestions
+            # only, never applies anything. See advisor.py's module docstring
+            # for the boundary this respects.
+            last_run = float(storage.get_meta("last_advisor_run_ts", "0"))
+            if time.time() - last_run > advisor_interval:
+                try:
+                    import advisor
+                    advisor.generate_suggestions()
+                except Exception as e:
+                    log.warning(f"Advisor run failed (non-fatal, trading continues): {e}")
+
             consecutive_failures = 0
         except Exception as e:
             # One bad cycle (API hiccup, network blip, a market with malformed
