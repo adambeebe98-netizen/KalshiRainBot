@@ -1,0 +1,22 @@
+name: Deploy to droplet
+
+# Runs automatically every time code lands on main — no manual trigger needed.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH in and pull + restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            cd ~/kalshi_weather_bot
+            git pull
+            sudo systemctl restart kalshi-weather-bot kalshi-bot-ui
+            echo "Deployed at $(date)"
