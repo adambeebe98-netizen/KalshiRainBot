@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS price_history (
 );
 CREATE INDEX IF NOT EXISTS idx_price_history_ticker_ts ON price_history(ticker, ts);
 
+-- Same idea as price_history, but for the NWS forecast temperature used by
+-- the temperature model (see strategy.pick_relevant_forecast_temp_f) rather
+-- than the market's own quoted price. Lets temp_forecast_momentum detect
+-- "the forecast just moved" as a distinct signal from "the market price
+-- moved" — logged once per scanned temperature market per cycle, same
+-- cadence as price_history.
+CREATE TABLE IF NOT EXISTS forecast_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    forecast_temp_f REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_forecast_history_ticker_ts ON forecast_history(ticker, ts);
+
 -- Human-approved overrides to the heuristic strategies' guessed thresholds
 -- (swing/favorites/longshot — never the calibrated model or arbitrage).
 -- Only ever written by the dashboard's "Apply" button (see web_ui/app.py) —
@@ -528,6 +542,29 @@ def get_latest_price(ticker: str) -> dict | None:
             (ticker,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_previous_forecast_temp_f(ticker: str) -> float | None:
+    """The most recently logged forecast temp for this ticker — call this
+    BEFORE log_forecast_snapshot() for the current cycle, so "most recent"
+    means "as of last cycle," not "as of right now." Returns None on the
+    first-ever scan of a ticker (nothing to compare against yet)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT forecast_temp_f FROM forecast_history WHERE ticker=? ORDER BY ts DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        return row[0] if row else None
+
+
+def log_forecast_snapshot(ticker: str, forecast_temp_f: float | None) -> None:
+    if forecast_temp_f is None:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO forecast_history (ts, ticker, forecast_temp_f) VALUES (?,?,?)",
+            (int(time.time()), ticker, forecast_temp_f),
+        )
 
 
 def get_price_history(ticker: str, limit: int = 500) -> list[dict]:
