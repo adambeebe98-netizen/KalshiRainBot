@@ -544,6 +544,31 @@ def get_latest_price(ticker: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_current_open_markets(window_seconds: int = 900) -> list[dict]:
+    """
+    "Currently open" isn't tracked as its own state anywhere — this infers
+    it from price_history instead: every market that's actually open gets a
+    fresh snapshot logged every scan cycle (see bot.py), so a ticker with a
+    RECENT snapshot is open, and one that's gone quiet (closed/settled, so
+    nothing is logging it anymore) ages out of this list on its own after
+    `window_seconds` with no new activity. Default window is 3x the normal
+    5-minute poll interval — wide enough to tolerate one missed cycle
+    without a genuinely-open market dropping off.
+
+    Returns the latest snapshot per ticker, most recently updated first.
+    """
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        cutoff = int(time.time()) - window_seconds
+        rows = conn.execute(
+            "SELECT p1.ticker, p1.yes_ask, p1.yes_bid, p1.ts FROM price_history p1 "
+            "WHERE p1.ts = (SELECT MAX(p2.ts) FROM price_history p2 WHERE p2.ticker = p1.ticker) "
+            "AND p1.ts >= ? ORDER BY p1.ts DESC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_previous_forecast_temp_f(ticker: str) -> float | None:
     """The most recently logged forecast temp for this ticker — call this
     BEFORE log_forecast_snapshot() for the current cycle, so "most recent"
