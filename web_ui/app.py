@@ -175,19 +175,24 @@ DASHBOARD_PAGE = """
   <h2>Strategy comparison <span style="font-size:12px;color:#8b949e;">(all paper — none of these place real orders)</span></h2>
   <canvas id="strategyChart" height="90"></canvas>
   <table style="margin-top:16px;">
-    <tr><th>Strategy</th><th>Bankroll</th><th>Settled trades</th><th>Win rate</th><th>Total P&L</th></tr>
+    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days tracked</th></tr>
     {% for s in shadow_summary %}
-    <tr>
+    <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 else '' }}>
+      <td>{{ s.rank }}</td>
       <td>{{ s.strategy }}</td>
       <td>${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</td>
+      <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">
+        {{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}
+      </td>
       <td>{{ s.settled }}</td>
       <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
       <td class="{{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">
         {{ "%.2f"|format((s.total_pnl_cents or 0)/100) }}
       </td>
+      <td>{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</td>
     </tr>
     {% endfor %}
-    {% if not shadow_summary %}<tr><td colspan="5">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
+    {% if not shadow_summary %}<tr><td colspan="8">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
   </table>
 </div>
 
