@@ -27,9 +27,17 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
     settled_count = 0
 
     # One settlement check per unique ticker, shared between real trades and
-    # every shadow strategy — so having 6 shadow strategies doesn't mean 6x
-    # the API calls.
-    tickers_to_check = {t["ticker"] for t in open_trades} | {t["ticker"] for t in open_shadow}
+    # every shadow strategy — so having 6+ shadow strategies doesn't mean 6x
+    # the API calls. bracket_arbitrage trades store a SYNTHETIC event ticker
+    # in `ticker` (not a real market — see shadow.evaluate_bracket_set), so
+    # they contribute their `sample_member_ticker` here instead, which IS a
+    # real, pollable market ticker.
+    real_shadow_tickers = {
+        (t["sample_member_ticker"] if t["strategy"] == "bracket_arbitrage" else t["ticker"])
+        for t in open_shadow
+    }
+    real_shadow_tickers.discard(None)
+    tickers_to_check = {t["ticker"] for t in open_trades} | real_shadow_tickers
     checked: dict[str, tuple[bool, str | None]] = {}
     for ticker in tickers_to_check:
         try:
@@ -75,6 +83,10 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
     swing_closed = shadow.check_swing_exits()
     if swing_closed:
         log.info(f"Closed {swing_closed} swing position(s) early on price target this cycle.")
+
+    bracket_settled = shadow.settle_bracket_arbitrage(checked)
+    if bracket_settled:
+        log.info(f"Settled {bracket_settled} bracket-arbitrage set(s) this cycle.")
 
     shadow_settled = shadow.settle(checked)
     shadow.snapshot_all()
