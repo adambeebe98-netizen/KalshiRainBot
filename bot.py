@@ -112,9 +112,14 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
         # This is the actual proof of how many individual markets (cities,
         # for KXRAIN) came back for this one series — check this line in
         # the log/dashboard to confirm multiple cities are really coming
-        # through, rather than assuming it from the API structure.
-        log.info(f"Series {series_ticker}: {len(found)} open market(s) — "
-                 f"{[m['ticker'] for m in found][:15]}{'...' if len(found) > 15 else ''}")
+        # through, rather than assuming it from the API structure. Only
+        # logs when something was actually found — with discovery pulling
+        # in every series that keyword-matches (many of which are empty or
+        # not the real home of a given city's market), logging every empty
+        # check drowned out the real hits.
+        if found:
+            log.info(f"Series {series_ticker}: {len(found)} open market(s) — "
+                     f"{[m['ticker'] for m in found][:15]}{'...' if len(found) > 15 else ''}")
 
         # Group by event so bracket_arbitrage can evaluate each full set of
         # mutually-exclusive brackets together — it needs ALL of a day's
