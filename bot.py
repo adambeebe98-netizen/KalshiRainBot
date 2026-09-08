@@ -40,7 +40,7 @@ from config import SETTINGS
 from kalshi_client import KalshiClient
 from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
-from strategy import evaluate_market
+from strategy import evaluate_market, evaluate_temperature_market
 from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE
 import settlement
 import shadow
@@ -168,8 +168,18 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 # No lat/lon on file for forecast lookup — add it to STATION_REFERENCE
                 # in weather_data.py to enable forecast-based signals for this station.
 
-            # 3. Evaluate.
-            signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
+            # 3. Evaluate — routed by measure type, since precipitation and
+            # temperature markets need different models (they used to both
+            # go through the rain model, which silently produced meaningless
+            # signals for temperature markets).
+            if rules.measure in ("precipitation_daily", "precipitation_monthly"):
+                signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
+            elif rules.measure in ("temperature_high", "temperature_low"):
+                signal = evaluate_temperature_market(ticker, yes_price, rules, observation, forecast)
+            else:
+                storage.log_decision(ticker, "n/a", yes_price, 0.5, 0, "skipped",
+                                      f"no model for measure={rules.measure!r}", mode)
+                continue
 
             # Every shadow strategy (see shadow.py / strategies_lib.py) gets a
             # look at this same market, independent of what the ACTIVE bot
