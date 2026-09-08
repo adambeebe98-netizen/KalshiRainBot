@@ -1,0 +1,45 @@
+# Runs the bot as a background service that survives reboots and
+# auto-restarts if it crashes. This is what makes it "little to no
+# maintenance" instead of "a terminal window you have to keep open."
+#
+# Install (on a Linux machine or a small VPS — NOT something that sleeps,
+# like a laptop that closes):
+#   1. Edit the paths below to match where you put this project.
+#   2. sudo cp kalshi-weather-bot.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable kalshi-weather-bot   # start on boot
+#   5. sudo systemctl start kalshi-weather-bot
+#
+# Check on it:
+#   systemctl status kalshi-weather-bot
+#   journalctl -u kalshi-weather-bot -f          # live logs
+#
+# Stop it:
+#   sudo systemctl stop kalshi-weather-bot
+#
+# To run LIVE instead of paper: add --live to ExecStart below, and set both
+# LIVE_TRADING=true and LIVE_TRADING_CONFIRMED=true in your .env — a service
+# has no terminal to answer the interactive confirmation prompt, so both
+# flags exist specifically to make headless live trading a deliberate,
+# two-flag decision rather than an accident. Strongly consider running
+# --live manually in a terminal session first, for a while, before ever
+# setting LIVE_TRADING_CONFIRMED=true here.
+
+[Unit]
+Description=Kalshi Weather Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/kalshi_weather_bot
+EnvironmentFile=/path/to/kalshi_weather_bot/.env
+ExecStart=/path/to/kalshi_weather_bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/path/to/kalshi_weather_bot/service.log
+StandardError=append:/path/to/kalshi_weather_bot/service.log
+
+[Install]
+WantedBy=multi-user.target
