@@ -33,6 +33,8 @@ JSON object (no prose, no markdown fences) with these exact fields:
   "settlement_source": "<'NWS' | 'The Weather Company' | 'NOAA CDO' | 'other' | 'unclear'>",
   "measure": "<'precipitation_daily' | 'precipitation_monthly' | 'temperature_high' | 'temperature_low' | 'other'>",
   "threshold_description": "<plain-language threshold, e.g. 'strictly greater than 0 inches' or 'high temperature 85-89F'>",
+  "threshold_low_f": "<for temperature_high/temperature_low markets ONLY: numeric lower bound in Fahrenheit for YES to resolve true, or null if there is no lower bound (e.g. 'less than 70F' has no lower bound) or if measure is not a temperature type>",
+  "threshold_high_f": "<for temperature_high/temperature_low markets ONLY: numeric upper bound in Fahrenheit for YES to resolve true, or null if there is no upper bound (e.g. 'greater than 85F' has no upper bound) or if measure is not a temperature type>",
   "trace_counts_as_zero": <true | false | null if not stated>,
   "fallback_rule": "<brief description of what happens if primary source has no data, or null>",
   "confidence": "<'high' | 'medium' | 'low' — your confidence this extraction is complete and correct>"
@@ -42,6 +44,14 @@ Rules text:
 ---
 {rules_text}
 ---"""
+
+# Bump this whenever MarketRules gains/changes a field that changes what a
+# cached extraction means — e.g. adding threshold_low_f/threshold_high_f.
+# Cached entries written under an older version get transparently
+# re-extracted once (see extract() below) instead of silently running with
+# fields that don't exist / are always null, which would otherwise leave a
+# temperature model doing nothing without any error to notice.
+CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -54,6 +64,8 @@ class MarketRules:
     trace_counts_as_zero: Optional[bool]
     fallback_rule: Optional[str]
     confidence: str
+    threshold_low_f: Optional[float] = None
+    threshold_high_f: Optional[float] = None
 
 
 class RulesExtractor:
@@ -74,15 +86,21 @@ class RulesExtractor:
 
     def extract(self, ticker: str, rules_text: str, force: bool = False) -> MarketRules:
         if not force and ticker in self._cache:
-            return MarketRules(**self._cache[ticker])
+            cached = self._cache[ticker]
+            if cached.get("_schema_version") == CACHE_SCHEMA_VERSION:
+                return MarketRules(**{k: v for k, v in cached.items() if k != "_schema_version"})
+            # Older cache entry from before this field set existed — refresh
+            # once rather than running forever with fields that are always
+            # null (see CACHE_SCHEMA_VERSION comment above).
 
         if not rules_text.strip():
             result = MarketRules(
                 ticker=ticker, station_code=None, settlement_source="unclear",
                 measure="other", threshold_description="no rules text available",
                 trace_counts_as_zero=None, fallback_rule=None, confidence="low",
+                threshold_low_f=None, threshold_high_f=None,
             )
-            self._cache[ticker] = asdict(result)
+            self._cache[ticker] = {"_schema_version": CACHE_SCHEMA_VERSION, **asdict(result)}
             self._save_cache()
             return result
 
@@ -99,10 +117,11 @@ class RulesExtractor:
             parsed = {
                 "station_code": None, "settlement_source": "unclear", "measure": "other",
                 "threshold_description": "extraction failed — parse manually",
+                "threshold_low_f": None, "threshold_high_f": None,
                 "trace_counts_as_zero": None, "fallback_rule": None, "confidence": "low",
             }
 
         result = MarketRules(ticker=ticker, **parsed)
-        self._cache[ticker] = asdict(result)
+        self._cache[ticker] = {"_schema_version": CACHE_SCHEMA_VERSION, **asdict(result)}
         self._save_cache()
         return result
