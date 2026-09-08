@@ -1,0 +1,11 @@
+.env
+venv/
+*.db
+*.pem
+__pycache__/
+web_ui/__pycache__/
+*.log
+rules_cache.json
+service.log
+install.log
+install_ui.log
