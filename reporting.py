@@ -47,12 +47,14 @@ def build_export_text(env: dict | None = None) -> str:
         lines.append(f"(active bankroll unavailable: {e})")
     lines.append("")
 
-    lines.append("--- STRATEGY COMPARISON (all paper) ---")
+    lines.append("--- STRATEGY COMPARISON (all paper, ranked by total P&L) ---")
     try:
         for s in storage.get_shadow_summary():
             wr = f"{s['win_rate']*100:.0f}%" if s["win_rate"] is not None else "n/a"
-            lines.append(f"{s['strategy']:<24} bankroll=${(s['bankroll_cents'] or 0)/100:>8.2f}  "
-                         f"settled={s['settled']:<4} win_rate={wr:<6} total_pnl=${(s['total_pnl_cents'] or 0)/100:.2f}")
+            roi = f"{s['roi_pct']:+.1f}%" if s["roi_pct"] is not None else "n/a"
+            days = f"{s['days_tracked']:.0f}d" if s["days_tracked"] is not None else "n/a"
+            lines.append(f"#{s['rank']:<2} {s['strategy']:<24} roi={roi:<8} bankroll=${(s['bankroll_cents'] or 0)/100:>8.2f}  "
+                         f"settled={s['settled']:<4} win_rate={wr:<6} total_pnl=${(s['total_pnl_cents'] or 0)/100:.2f}  tracked={days}")
     except Exception as e:
         lines.append(f"(shadow summary unavailable: {e})")
     lines.append("")
