@@ -35,6 +35,7 @@ from config import RISK_PRESETS, SETTINGS
 from risk_manager import RiskManager, RiskState, RiskPreset
 from strategy import TradeSignal
 import strategies_lib as lib
+import fees
 import storage
 
 STRATEGIES = {
@@ -71,7 +72,50 @@ STRATEGIES = {
     # enough data (a few weeks minimum) — check storage.get_price_history()
     # per ticker before trusting this strategy's results over the others.
     "swing":                   {"kind": "swing", "risk": "balanced", "entry_max": 40, "exit_offset": 20},
+    # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
+    # (e.g. every temperature bucket for one city/day), buys the side (all
+    # NO, or rarely all YES) whose combined price guarantees a profit no
+    # matter which bracket actually wins — see evaluate_bracket_set() below
+    # for the real math and evaluate_and_log_fees for why this needed its
+    # own fee accounting instead of the generic per-order one.
+    # min_edge_cents_override here means "minimum NET (already fee-adjusted)
+    # cents of guaranteed profit per set" — kept deliberately above 0 to
+    # leave room for execution slippage the fee model doesn't capture.
+    # max_price_override is wide because "price" here is the summed cost
+    # across the whole bracket set, not one contract (can exceed 99c easily).
+    "bracket_arbitrage":       {"kind": "bracket_arbitrage", "risk": "conservative",
+                                 "min_edge_cents_override": 3, "max_price_override": 5000},
 }
+
+# Only these strategy+param combinations are ever eligible for an
+# advisor.py suggestion or a dashboard override — the calibrated model and
+# arbitrage are never auto-tuned, on purpose (see advisor.py).
+TUNABLE_PARAMS = {
+    "swing": ["entry_max", "exit_offset"],
+    "favorites_baseline": ["threshold"],
+    "longshot": ["min_price", "max_price"],
+}
+
+
+def _load_active_strategies() -> dict:
+    """STRATEGIES with any human-approved overrides (from the dashboard's
+    Apply button) merged in. Computed once at import — overrides take
+    effect on the next restart, same as every other setting in this app."""
+    merged = {name: dict(cfg) for name, cfg in STRATEGIES.items()}
+    try:
+        overrides = storage.get_overrides()
+        for name, params in overrides.items():
+            if name in merged:
+                allowed = TUNABLE_PARAMS.get(name, [])
+                for param, value in params.items():
+                    if param in allowed:
+                        merged[name][param] = value
+    except Exception:
+        pass  # DB may not exist yet on a very first run — fall back to defaults
+    return merged
+
+
+ACTIVE_STRATEGIES = _load_active_strategies()
 
 _engines: dict[str, RiskManager] | None = None
 
@@ -92,7 +136,7 @@ def get_engines() -> dict[str, RiskManager]:
     global _engines
     if _engines is None:
         _engines = {}
-        for name, cfg in STRATEGIES.items():
+        for name, cfg in ACTIVE_STRATEGIES.items():
             bankroll = storage.load_last_shadow_bankroll(name, SETTINGS.starting_bankroll_cents)
             state = RiskState(bankroll_cents=bankroll, day=date.today())
             _engines[name] = RiskManager(state, _build_preset(cfg))
@@ -105,7 +149,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
     decides whether IT would trade this market — never a real order."""
     engines = get_engines()
 
-    for name, cfg in STRATEGIES.items():
+    for name, cfg in ACTIVE_STRATEGIES.items():
         rm = engines[name]
         kind = cfg["kind"]
 
@@ -178,6 +222,123 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                                   model_probability=model_prob, station_code=station_code, measure=measure,
                                   exit_target_cents=exit_target)
         rm.record_fill(cost_cents=contracts * candidate.price_cents)
+
+
+def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
+    """
+    Called once per event (a full group of mutually-exclusive brackets —
+    e.g. every temperature bucket for one city/day), separately from
+    evaluate_and_log which only ever sees one market at a time. Needs the
+    WHOLE group at once because the arbitrage only exists across the full
+    set, not in any single bracket.
+
+    markets: list of market dicts (from kalshi_client.get_markets) sharing
+    this event_ticker, each expected to have 'ticker', 'yes_ask', and
+    either 'no_ask' or 'yes_bid'.
+    """
+    if "bracket_arbitrage" not in ACTIVE_STRATEGIES or len(markets) < 2:
+        return
+
+    cfg = ACTIVE_STRATEGIES["bracket_arbitrage"]
+    rm = get_engines()["bracket_arbitrage"]
+    n = len(markets)
+
+    prices = []  # (ticker, yes_ask, no_ask)
+    for m in markets:
+        yes_ask = m.get("yes_ask")
+        no_ask = m.get("no_ask")
+        if no_ask is None and m.get("yes_bid") is not None:
+            no_ask = 100 - m["yes_bid"]
+        if yes_ask is None or no_ask is None:
+            return  # incomplete data for this event this cycle — skip rather than guess
+        prices.append((m["ticker"], yes_ask, no_ask))
+
+    sum_yes = sum(p[1] for p in prices)
+    sum_no = sum(p[2] for p in prices)
+
+    # Direction 1 (the common one): buy NO on every bracket. Exactly one
+    # loses (the winner), the other n-1 pay out $1 each. Profitable whenever
+    # sum_yes > 100 (Kalshi's normal overround/vig on a full bracket set).
+    # Direction 2 (rare): buy YES on every bracket — profitable only if
+    # sum_yes < 100, which would mean the set is underpriced overall.
+    if sum_yes > 100:
+        direction = "no"
+        per_bracket_prices = [p[2] for p in prices]  # no_ask per bracket
+        total_cost = sum_no
+        guaranteed_payout_per_set = 100 * (n - 1)
+    elif sum_yes < 100:
+        direction = "yes"
+        per_bracket_prices = [p[1] for p in prices]  # yes_ask per bracket
+        total_cost = sum_yes
+        guaranteed_payout_per_set = 100
+    else:
+        return  # exactly 100 — no edge either direction
+
+    gross_edge_per_set = guaranteed_payout_per_set - total_cost
+    if gross_edge_per_set <= 0:
+        return
+
+    # How many SETS can the bankroll afford, per the usual sizing rule —
+    # "price" of one set is total_cost, same arithmetic as any other strategy.
+    sets = rm.max_contracts_for_trade(total_cost)
+    if sets < 1:
+        return
+
+    # Real fee: a SEPARATE order per bracket, each at its own price — must
+    # sum the real per-order fee, not apply the formula to the summed price
+    # (the formula is non-linear, so that would give a wrong number).
+    total_fee_cents = sum(fees.taker_fee_cents(sets, p) for p in per_bracket_prices)
+    net_edge_per_set = gross_edge_per_set - (total_fee_cents / sets)
+
+    if net_edge_per_set < cfg.get("min_edge_cents_override", 3):
+        storage.log_decision(event_ticker, direction, total_cost, 1.0, int(net_edge_per_set),
+                              "skipped", f"gross edge {gross_edge_per_set}c doesn't clear "
+                              f"fee-adjusted minimum after {total_fee_cents}c total fees", "shadow")
+        return
+
+    approved, reason = rm.approve_trade(total_cost, int(net_edge_per_set), edge_already_net_of_fees=True)
+    if not approved:
+        return
+
+    storage.log_shadow_trade(
+        "bracket_arbitrage", event_ticker, f"set_{direction}", sets, total_cost,
+        precomputed_payout_cents=guaranteed_payout_per_set * sets,
+        sample_member_ticker=prices[0][0],
+    )
+    rm.record_fill(cost_cents=total_cost * sets)
+
+
+def settle_bracket_arbitrage(ticker_results: dict[str, tuple[bool, "str | None"]]) -> int:
+    """
+    Bracket arbitrage's payout is fixed the moment the trade is placed
+    (see evaluate_bracket_set above) — it doesn't matter WHICH bracket
+    wins, only WHETHER the event has resolved yet. So this only needs to
+    poll one representative member ticker per open position, not figure
+    out the actual winning bracket.
+    """
+    engines = get_engines()
+    open_trades = storage.get_open_shadow_trades(strategy="bracket_arbitrage")
+    settled_count = 0
+
+    for trade in open_trades:
+        sample_ticker = trade["sample_member_ticker"]
+        if not sample_ticker or sample_ticker not in ticker_results:
+            continue
+        is_settled, _result = ticker_results[sample_ticker]
+        if not is_settled:
+            continue
+
+        payout = trade["precomputed_payout_cents"] or 0
+        cost = trade["price_cents"] * trade["count"]
+        pnl_cents = payout - cost
+
+        storage.settle_shadow_trade(trade["id"], pnl_cents > 0, pnl_cents)
+        rm = engines.get("bracket_arbitrage")
+        if rm:
+            rm.record_settlement(pnl_cents)
+        settled_count += 1
+
+    return settled_count
 
 
 def check_swing_exits() -> int:
