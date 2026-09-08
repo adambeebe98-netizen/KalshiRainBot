@@ -205,6 +205,7 @@ DASHBOARD_PAGE = """
 
 <div class="card">
   <h2>By category <span style="font-size:12px;color:#8b949e;">(same paper trades, split by what kind of market they're on — some categories may just never be profitable, and that's a real finding, not a bug)</span></h2>
+  <canvas id="categoryChart" height="80"></canvas>
   {% for cat, data in category_summary.items() %}
   <div style="border:1px solid #30363d;border-radius:6px;padding:14px;margin-bottom:14px;">
     <h3 style="margin:0 0 6px 0;">
@@ -372,6 +373,30 @@ DASHBOARD_PAGE = """
       plugins: { legend: { labels: { color: '#e6edf3' } } }
     }
   });
+
+  const categoryPnlData = {{ category_pnl_history|tojson }};
+  const categoryColors = { Rain: '#58a6ff', Temperature: '#d29922', Other: '#bc8cff' };
+  new Chart(document.getElementById('categoryChart'), {
+    type: 'line',
+    data: {
+      datasets: Object.keys(categoryPnlData).map((cat, i) => ({
+        label: cat + ' (cumulative P&L)',
+        data: categoryPnlData[cat].map(p => ({x: p[0]*1000, y: p[1]/100})),
+        borderColor: categoryColors[cat] || ['#3fb950','#f85149','#39c5cf'][i % 3],
+        backgroundColor: 'transparent',
+        tension: 0.1,
+        pointRadius: 2,
+      }))
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+        y: { ticks: { color: '#8b949e', callback: v => '$' + v }, grid: { color: '#30363d' } }
+      },
+      plugins: { legend: { labels: { color: '#e6edf3' } } }
+    }
+  });
 </script>
 
 </body></html>
@@ -411,6 +436,7 @@ def dashboard():
     shadow_summary = []
     category_summary = {}
     chart_data = {}
+    category_pnl_history = {}
     try:
         shadow_summary = storage.get_shadow_summary()
         category_summary = storage.get_shadow_summary_by_category()
@@ -418,6 +444,7 @@ def dashboard():
             history = storage.get_shadow_bankroll_history(name, limit=500)
             if history:
                 chart_data[name] = [[ts, cents] for ts, cents in history]
+        category_pnl_history = storage.get_category_pnl_over_time()
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -433,6 +460,7 @@ def dashboard():
         category_summary=category_summary,
         min_sample_size=categories.MIN_SAMPLE_SIZE,
         chart_data=chart_data,
+        category_pnl_history=category_pnl_history,
         suggestions=storage.get_suggestions(status="pending"),
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
