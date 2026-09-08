@@ -140,19 +140,29 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
 
         for market in found:
             ticker = market["ticker"]
-            yes_price = market.get("yes_ask") or market.get("last_price")
-            if not yes_price:
-                continue
 
             # Log a price point for EVERY scanned market, regardless of
-            # whether any strategy trades it — this is the raw data needed
-            # to eventually design a real swing-trading strategy from
-            # observed movement instead of a guess (see shadow.py's "swing"
-            # strategy notes).
+            # whether it currently has a tradeable price — this is what
+            # feeds the dashboard's "Open markets" view and the raw data
+            # needed to eventually design a real swing-trading strategy
+            # from observed movement instead of a guess (see shadow.py's
+            # "swing" strategy notes). Deliberately BEFORE the tradeability
+            # check below: a thin market with no live ask and no trade
+            # history yet is still genuinely open, and should still show up
+            # as open, even though there's nothing to compute a signal
+            # against yet.
+            storage.log_price_snapshot(ticker, market.get("yes_ask"), market.get("yes_bid"))
+
+            yes_price = market.get("yes_ask") or market.get("last_price")
+            if not yes_price:
+                storage.log_decision(ticker, "n/a", 0, 0.5, 0, "skipped",
+                                      "no live ask quote or trade history yet — nothing to price a signal against",
+                                      mode)
+                continue
+
             no_ask = market.get("no_ask")
             if no_ask is None and market.get("yes_bid") is not None:
                 no_ask = 100 - market["yes_bid"]
-            storage.log_price_snapshot(ticker, yes_price, market.get("yes_bid"))
 
             # 1. Get and cache structured settlement rules for this market.
             rules_text = kalshi.get_market_rules_text(ticker)
