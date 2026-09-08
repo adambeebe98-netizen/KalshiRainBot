@@ -78,7 +78,7 @@ class KalshiClient:
         # including the /trade-api/v2 prefix — adjust here if Kalshi changes this.
         full_path = path if path.startswith("/trade-api") else f"/trade-api/v2{path}"
         headers = self._headers(method, full_path)
-        resp = self._client.request(method, path, params=params, json=json_body, headers=headers)
+        resp = self._client.request(method, full_path, params=params, json=json_body, headers=headers)
         if resp.status_code >= 400:
             raise RuntimeError(f"Kalshi API error {resp.status_code} on {method} {path}: {resp.text}")
         return resp.json()
