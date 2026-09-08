@@ -35,6 +35,7 @@ from config import RISK_PRESETS, SETTINGS
 from risk_manager import RiskManager, RiskState, RiskPreset
 from strategy import TradeSignal
 import strategies_lib as lib
+import categories
 import fees
 import storage
 
@@ -42,6 +43,20 @@ STRATEGIES = {
     "calibrated_conservative": {"kind": "calibrated", "risk": "conservative"},
     "calibrated_balanced":     {"kind": "calibrated", "risk": "balanced"},
     "calibrated_aggressive":   {"kind": "calibrated", "risk": "aggressive"},
+    # Category-scoped calibrated variants — same model, same three risk
+    # presets, but each one only ever evaluates markets in ONE category
+    # (via cfg["category_filter"], checked once up front in
+    # evaluate_and_log for every strategy kind, not just these) and keeps
+    # its own separate paper bankroll. This is what makes "is aggressive
+    # actually good on temperature specifically" an answerable question —
+    # the plain calibrated_* strategies above blend rain+temperature+other
+    # into one shared bankroll, which hides that.
+    "temp_calibrated_conservative": {"kind": "calibrated", "risk": "conservative", "category_filter": "Temperature"},
+    "temp_calibrated_balanced":     {"kind": "calibrated", "risk": "balanced",     "category_filter": "Temperature"},
+    "temp_calibrated_aggressive":   {"kind": "calibrated", "risk": "aggressive",   "category_filter": "Temperature"},
+    "rain_calibrated_conservative": {"kind": "calibrated", "risk": "conservative", "category_filter": "Rain"},
+    "rain_calibrated_balanced":     {"kind": "calibrated", "risk": "balanced",     "category_filter": "Rain"},
+    "rain_calibrated_aggressive":   {"kind": "calibrated", "risk": "aggressive",   "category_filter": "Rain"},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
     # edge — a much lower bar clears it (even 1-2c guaranteed is worth
     # taking in theory; real fees would eat small amounts, which is exactly
@@ -152,6 +167,14 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
     for name, cfg in ACTIVE_STRATEGIES.items():
         rm = engines[name]
         kind = cfg["kind"]
+
+        # Category-scoped strategies (temp_calibrated_*, rain_calibrated_*)
+        # only ever evaluate markets in their one category — checked once
+        # here, ahead of the per-kind branches below, so it applies the
+        # same way no matter which kind a scoped strategy ever uses.
+        cat_filter = cfg.get("category_filter")
+        if cat_filter and categories.category_for(measure) != cat_filter:
+            continue
 
         if kind == "calibrated":
             if not signal:
