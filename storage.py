@@ -602,6 +602,8 @@ def get_decision_summary(hours: int = 24) -> dict:
             return "low-confidence rules extraction (never reaches shadow strategies)"
         if r.startswith("no model for measure"):
             return "unrecognized measure — not weather, or a new measure type (never reaches shadow strategies)"
+        if r.startswith("no live ask quote"):
+            return "no tradeable quote yet (thin/new market — never reaches shadow strategies)"
         if "kill switch" in r:
             return "daily loss kill switch tripped"
         if r.startswith("at max open positions"):
