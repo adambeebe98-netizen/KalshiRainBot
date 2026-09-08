@@ -198,7 +198,10 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                         ticker=ticker, side=signal.side, action="buy",
                         count=contracts, price_cents=price,
                     )
-                    order_id = order.get("order", {}).get("order_id")
+                    # V2's create-order response is flat (order_id at the top
+                    # level), unlike the legacy endpoint's {"order": {...}}
+                    # wrapper — see kalshi_client.create_order()'s docstring.
+                    order_id = order.get("order_id")
                     log.info(f"LIVE order placed: {ticker} {signal.side} x{contracts} @ {price}c "
                              f"(edge {signal.edge_cents}c) — {order_id}")
                 except Exception as e:
@@ -263,12 +266,13 @@ def main():
             sys.exit(1)
         if not SETTINGS.order_schema_verified:
             log.error(
-                "create_order() targets a Kalshi order schema that has NOT been verified "
-                "against the current live API (multiple sources report the old integer-cents "
-                "order endpoint was deprecated mid-2026 — see kalshi_client.py's create_order "
-                "docstring). Real orders may fail or behave unexpectedly. Set "
-                "ORDER_SCHEMA_VERIFIED=true in .env only after confirming a real test order "
-                "works, or ask for this to be fixed first."
+                "create_order() now targets Kalshi's V2 order schema (bid/ask, fixed-point "
+                "dollar strings — see kalshi_client.py's create_order docstring), matching "
+                "docs.kalshi.com as of 2026-09-08. But published docs and live behavior "
+                "aren't guaranteed identical, and this has NOT been confirmed against a real "
+                "order on the live API. Real orders may still fail or behave unexpectedly. "
+                "Set ORDER_SCHEMA_VERIFIED=true in .env only after confirming a real test "
+                "order works."
             )
             sys.exit(1)
         if not confirm_live_trading():
