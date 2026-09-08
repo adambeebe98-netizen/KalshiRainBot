@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import secrets
+import time
 from pathlib import Path
 
 from flask import Flask, request, session, redirect, url_for, render_template_string
@@ -240,6 +241,19 @@ DASHBOARD_PAGE = """
 </div>
 
 <div class="card">
+  <h2>Open markets <span style="font-size:12px;color:#8b949e;">(currently being scanned — a ticker drops off this list once the bot stops seeing fresh quotes for it, meaning it closed or settled)</span></h2>
+  <table>
+    <tr><th>Ticker</th><th>Yes ask</th><th>Yes bid</th><th>No ask (implied)</th><th>Last seen</th></tr>
+    {% for m in open_markets %}
+    <tr><td>{{ m.ticker }}</td><td>{{ m.yes_ask }}c</td><td>{{ m.yes_bid }}c</td>
+        <td>{{ (100 - m.yes_bid) if m.yes_bid is not none else '—' }}c</td>
+        <td>{{ m.last_seen }}</td></tr>
+    {% endfor %}
+    {% if not open_markets %}<tr><td colspan="5">No markets scanned yet this cycle.</td></tr>{% endif %}
+  </table>
+</div>
+
+<div class="card">
   <h2>Recent trades</h2>
   <table>
     <tr><th>Time</th><th>Ticker</th><th>Side</th><th>Count</th><th>Price</th><th>Status</th><th>PnL</th></tr>
@@ -437,6 +451,7 @@ def dashboard():
     category_summary = {}
     chart_data = {}
     category_pnl_history = {}
+    open_markets = []
     try:
         shadow_summary = storage.get_shadow_summary()
         category_summary = storage.get_shadow_summary_by_category()
@@ -445,6 +460,11 @@ def dashboard():
             if history:
                 chart_data[name] = [[ts, cents] for ts, cents in history]
         category_pnl_history = storage.get_category_pnl_over_time()
+        now = int(time.time())
+        for m in storage.get_current_open_markets():
+            age_s = now - m["ts"]
+            last_seen = f"{age_s}s ago" if age_s < 120 else f"{age_s // 60}m ago"
+            open_markets.append({**m, "last_seen": last_seen})
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -461,6 +481,7 @@ def dashboard():
         min_sample_size=categories.MIN_SAMPLE_SIZE,
         chart_data=chart_data,
         category_pnl_history=category_pnl_history,
+        open_markets=open_markets,
         suggestions=storage.get_suggestions(status="pending"),
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
