@@ -60,6 +60,10 @@ class Settings:
     # no human at a terminal to type the confirmation phrase (e.g. under
     # systemd). Defaults to false — headless live trading is opt-in twice over.
     live_confirmed_headless: bool = _bool("LIVE_TRADING_CONFIRMED", False)
+    # A third, independent gate specifically for whether create_order()'s
+    # request schema has been confirmed against the CURRENT live Kalshi API.
+    # Defaults false on purpose — see kalshi_client.py's create_order docstring.
+    order_schema_verified: bool = _bool("ORDER_SCHEMA_VERIFIED", False)
 
     # --- Risk mode ---
     # 'conservative' | 'balanced' | 'aggressive' — sets the three risk knobs
@@ -81,14 +85,23 @@ class Settings:
     db_path: str = os.getenv("DB_PATH", "bot_state.db")
 
     # --- Market scope ---
-    # Kalshi weather series tickers to scan, e.g. rain/precip series for specific cities.
-    # Keep this list explicit rather than scanning all markets — precision over coverage.
+    # Kalshi weather series tickers to scan. When AUTO_DISCOVER_SERIES is true
+    # (the default), this list is ignored in favor of live discovery — see
+    # kalshi_client.discover_series_tickers() and bot.py — so newly listed
+    # or delisted cities are picked up automatically without editing config.
+    # This becomes the fallback list only if discovery itself fails.
     series_tickers: tuple = tuple(
         t.strip() for t in os.getenv(
             "SERIES_TICKERS",
             "KXRAIN,KXHIGHTEMP"
         ).split(",") if t.strip()
     )
+    auto_discover_series: bool = _bool("AUTO_DISCOVER_SERIES", True)
+    discovery_keywords: tuple = tuple(
+        k.strip() for k in os.getenv("DISCOVERY_KEYWORDS", "rain,KXHIGH,KXLOW").split(",") if k.strip()
+    )
+    discovery_refresh_seconds: int = _int("DISCOVERY_REFRESH_SECONDS", 3600)  # re-check hourly
+    advisor_interval_seconds: int = _int("ADVISOR_INTERVAL_SECONDS", 7 * 24 * 3600)  # weekly by default
 
 
 SETTINGS = Settings()
