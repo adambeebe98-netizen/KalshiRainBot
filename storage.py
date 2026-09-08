@@ -569,6 +569,71 @@ def get_current_open_markets(window_seconds: int = 900) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_decision_summary(hours: int = 24) -> dict:
+    """
+    Diagnostic summary of the main bot's per-market decision log (see
+    log_decision, called in bot.py once per scanned market — either
+    'traded' or 'skipped' with a reason). This ISN'T shadow-strategy
+    activity — it's the ACTIVE bot's own gate — but it matters for shadow
+    strategies too: a market skipped here for "low-confidence rules
+    extraction" or "no model for measure" never even reaches
+    shadow.evaluate_and_log (see the `continue` statements in bot.py right
+    after those specific log_decision calls). So a big bucket of either of
+    those two reasons explains an otherwise-mysterious quiet day across
+    every shadow strategy, not just the main bot — that's the single most
+    useful thing this view can surface.
+
+    Skip reasons carry dynamic numbers (an exact price or edge value) that
+    would otherwise make almost every skip its own unique group — bucketed
+    here into stable categories by known prefix/substring instead.
+    """
+    cutoff = int(time.time()) - hours * 3600
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT action, reason FROM decisions WHERE ts >= ?", (cutoff,)
+        ).fetchall()
+
+    def bucket(reason: str | None) -> str:
+        if not reason:
+            return "(no reason logged)"
+        r = reason.lower()
+        if r.startswith("low-confidence"):
+            return "low-confidence rules extraction (never reaches shadow strategies)"
+        if r.startswith("no model for measure"):
+            return "unrecognized measure — not weather, or a new measure type (never reaches shadow strategies)"
+        if "kill switch" in r:
+            return "daily loss kill switch tripped"
+        if r.startswith("at max open positions"):
+            return "at max open positions"
+        if "outside allowed band" in r:
+            return "price outside allowed band"
+        if "below minimum" in r:
+            return "edge below minimum"
+        if "rounds to 0 contracts" in r:
+            return "position size too small for bankroll"
+        if r.startswith("orderbook fetch failed"):
+            return "orderbook fetch failed"
+        if "no size clears net-of-fee edge" in r:
+            return "no profitable size at real order-book depth"
+        return reason[:70]
+
+    counts = {"traded": 0}
+    skip_reasons: dict[str, int] = {}
+    for row in rows:
+        if row["action"] == "traded":
+            counts["traded"] += 1
+        else:
+            b = bucket(row["reason"])
+            skip_reasons[b] = skip_reasons.get(b, 0) + 1
+    counts["skipped"] = sum(skip_reasons.values())
+    counts["total"] = counts["traded"] + counts["skipped"]
+    return {
+        "counts": counts,
+        "skip_reasons": dict(sorted(skip_reasons.items(), key=lambda kv: -kv[1])),
+    }
+
+
 def get_previous_forecast_temp_f(ticker: str) -> float | None:
     """The most recently logged forecast temp for this ticker — call this
     BEFORE log_forecast_snapshot() for the current cycle, so "most recent"
