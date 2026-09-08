@@ -53,10 +53,29 @@ def build_export_text(env: dict | None = None) -> str:
             wr = f"{s['win_rate']*100:.0f}%" if s["win_rate"] is not None else "n/a"
             roi = f"{s['roi_pct']:+.1f}%" if s["roi_pct"] is not None else "n/a"
             days = f"{s['days_tracked']:.0f}d" if s["days_tracked"] is not None else "n/a"
+            low_data = "  [LOW DATA]" if not s["enough_data"] else ""
             lines.append(f"#{s['rank']:<2} {s['strategy']:<24} roi={roi:<8} bankroll=${(s['bankroll_cents'] or 0)/100:>8.2f}  "
-                         f"settled={s['settled']:<4} win_rate={wr:<6} total_pnl=${(s['total_pnl_cents'] or 0)/100:.2f}  tracked={days}")
+                         f"settled={s['settled']:<4} win_rate={wr:<6} total_pnl=${(s['total_pnl_cents'] or 0)/100:.2f}  tracked={days}{low_data}")
     except Exception as e:
         lines.append(f"(shadow summary unavailable: {e})")
+    lines.append("")
+
+    lines.append("--- BY CATEGORY (Rain vs Temperature vs Other — same paper trades, split by market type) ---")
+    try:
+        for cat, data in storage.get_shadow_summary_by_category().items():
+            o = data["overall"]
+            wr = f"{o['win_rate']*100:.0f}%" if o["win_rate"] is not None else "n/a"
+            roi = f"{o['roi_pct']:+.1f}%" if o["roi_pct"] is not None else "n/a"
+            low_data = "  [LOW DATA]" if not o["enough_data"] else ""
+            lines.append(f"{cat}: roi={roi} settled={o['settled']} win_rate={wr} "
+                         f"total_pnl=${(o['total_pnl_cents'] or 0)/100:.2f}{low_data}")
+            for s in data["strategies"]:
+                swr = f"{s['win_rate']*100:.0f}%" if s["win_rate"] is not None else "n/a"
+                sroi = f"{s['roi_pct']:+.1f}%" if s["roi_pct"] is not None else "n/a"
+                slow = "  [LOW DATA]" if not s["enough_data"] else ""
+                lines.append(f"    #{s['rank']:<2} {s['strategy']:<24} roi={sroi:<8} settled={s['settled']:<4} win_rate={swr}{slow}")
+    except Exception as e:
+        lines.append(f"(category summary unavailable: {e})")
     lines.append("")
 
     lines.append("--- CALIBRATION (per station/measure) ---")
