@@ -39,6 +39,34 @@ import categories
 import fees
 import storage
 
+# Position-size scaling for temp_calibrated_confidence_weighted, keyed by
+# rules_extractor's MarketRules.confidence. "low" never actually reaches
+# this (bot.py filters it out upstream, before any shadow strategy sees
+# the market at all) — kept here anyway so the mapping is honest about
+# what it WOULD do if that upstream filter ever changed.
+CONFIDENCE_SIZE_MULTIPLIER = {"high": 1.0, "medium": 0.5, "low": 0.0}
+
+# Bracket-arbitrage tuning — deliberately NOT in TUNABLE_PARAMS/advisor-editable,
+# same reasoning as the calibrated model itself: this is math (capital
+# efficiency + early-exit salvage), not a heuristic threshold to sweep.
+#
+# Legs priced at or above this (in cents, for whichever side the set is
+# buying) are skipped at entry — the market is already saying that bracket
+# has only a sliver of a chance of being the actual winner, so buying it
+# ties up nearly its full price for a cent or two of edge. Skipping trades
+# away the "mathematically guaranteed" property of the full hedge for a
+# small, deliberate, named tail risk (that specific improbable bracket DOES
+# win) in exchange for real capital efficiency elsewhere in the set.
+BRACKET_NEAR_CERTAIN_SKIP_CENTS = 97
+
+# Once a held bracket-arbitrage leg's current price has decayed to at or
+# below this floor (and below what we paid for it), sell it now instead of
+# carrying it all the way to a literal 0 at settlement — see
+# check_bracket_arbitrage_offload(). Deliberately small: this is about
+# salvaging a few otherwise-lost cents on a leg that's already basically
+# decided, not an early-exit signal in its own right.
+BRACKET_OFFLOAD_FLOOR_CENTS = 3
+
 STRATEGIES = {
     "calibrated_conservative": {"kind": "calibrated", "risk": "conservative"},
     "calibrated_balanced":     {"kind": "calibrated", "risk": "balanced"},
@@ -87,6 +115,23 @@ STRATEGIES = {
     # enough data (a few weeks minimum) — check storage.get_price_history()
     # per ticker before trusting this strategy's results over the others.
     "swing":                   {"kind": "swing", "risk": "balanced", "entry_max": 40, "exit_offset": 20},
+    # CONFIDENCE-WEIGHTED — same calibrated model as above, but position
+    # size is scaled down for medium-confidence rules extractions instead
+    # of treated identically to high-confidence ones. Low confidence never
+    # reaches here at all (bot.py already skips low-confidence markets
+    # entirely before any strategy sees them) — see CONFIDENCE_SIZE_MULTIPLIER
+    # below for the exact scaling.
+    "temp_calibrated_confidence_weighted": {"kind": "calibrated_confidence_weighted", "risk": "balanced",
+                                              "category_filter": "Temperature"},
+    # FORECAST MOMENTUM — only fires when the calibrated model likes the
+    # trade AND the NWS forecast for the relevant period moved by at least
+    # forecast_shift_threshold_f since the previous scan cycle. The idea:
+    # a normal calibrated edge can just be steady-state model-vs-market
+    # disagreement; requiring a fresh forecast revision alongside it is a
+    # filter for "the market probably hasn't caught up to new information
+    # yet," not a separate probability model of its own.
+    "temp_forecast_momentum": {"kind": "forecast_momentum", "risk": "balanced",
+                                 "category_filter": "Temperature", "forecast_shift_threshold_f": 3.0},
     # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
     # (e.g. every temperature bucket for one city/day), buys the side (all
     # NO, or rarely all YES) whose combined price guarantees a profit no
@@ -159,26 +204,47 @@ def get_engines() -> dict[str, RiskManager]:
 
 
 def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Optional[int],
-                      no_ask: Optional[int], station_code: Optional[str], measure: Optional[str]) -> None:
+                      no_ask: Optional[int], station_code: Optional[str], measure: Optional[str],
+                      confidence: Optional[str] = None,
+                      current_forecast_temp_f: Optional[float] = None,
+                      previous_forecast_temp_f: Optional[float] = None) -> None:
     """Called once per scanned market per cycle. Every strategy independently
-    decides whether IT would trade this market — never a real order."""
+    decides whether IT would trade this market — never a real order.
+
+    confidence/current_forecast_temp_f/previous_forecast_temp_f are optional
+    and only used by temp_calibrated_confidence_weighted and
+    temp_forecast_momentum respectively — every other strategy ignores them,
+    so existing callers that don't pass them keep working unchanged."""
     engines = get_engines()
 
     for name, cfg in ACTIVE_STRATEGIES.items():
         rm = engines[name]
         kind = cfg["kind"]
 
-        # Category-scoped strategies (temp_calibrated_*, rain_calibrated_*)
-        # only ever evaluate markets in their one category — checked once
-        # here, ahead of the per-kind branches below, so it applies the
-        # same way no matter which kind a scoped strategy ever uses.
+        # Category-scoped strategies (temp_calibrated_*, rain_calibrated_*,
+        # temp_forecast_momentum, etc.) only ever evaluate markets in their
+        # one category — checked once here, ahead of the per-kind branches
+        # below, so it applies the same way no matter which kind a scoped
+        # strategy ever uses.
         cat_filter = cfg.get("category_filter")
         if cat_filter and categories.category_for(measure) != cat_filter:
             continue
 
-        if kind == "calibrated":
+        if kind in ("calibrated", "calibrated_confidence_weighted"):
             if not signal:
                 continue
+            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            if price is None:
+                continue
+            candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
+            model_prob = signal.model_probability_yes
+
+        elif kind == "forecast_momentum":
+            if not signal or current_forecast_temp_f is None or previous_forecast_temp_f is None:
+                continue
+            shift = abs(current_forecast_temp_f - previous_forecast_temp_f)
+            if shift < cfg.get("forecast_shift_threshold_f", 3.0):
+                continue  # nothing moved enough this cycle to be "momentum," not just noise
             price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
             if price is None:
                 continue
@@ -240,6 +306,12 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         if contracts < 1:
             continue
 
+        if kind == "calibrated_confidence_weighted":
+            mult = CONFIDENCE_SIZE_MULTIPLIER.get(confidence, 1.0)
+            contracts = int(contracts * mult)
+            if contracts < 1:
+                continue
+
         exit_target = (candidate.price_cents + cfg["exit_offset"]) if kind == "swing" else None
         storage.log_shadow_trade(name, ticker, candidate.side, contracts, candidate.price_cents,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
@@ -258,15 +330,30 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
     markets: list of market dicts (from kalshi_client.get_markets) sharing
     this event_ticker, each expected to have 'ticker', 'yes_ask', and
     either 'no_ask' or 'yes_bid'.
+
+    Two refinements on top of the base guaranteed-hedge idea:
+      - Legs priced at/above BRACKET_NEAR_CERTAIN_SKIP_CENTS (market already
+        implying that bracket has only a sliver of a chance of being the
+        actual winner) are skipped at entry — see the constant's docstring
+        for the capital-efficiency-vs-tail-risk tradeoff being made. The
+        min-edge gate below uses the WORST-CASE payout (the actual winner
+        turns out to be one of the legs we DID buy — the common case, since
+        we specifically excluded the near-certain losers) rather than
+        best-case, so this stays conservative rather than overstating edge.
+      - Each included leg is logged as an ordinary per-ticker shadow trade
+        (real ticker, real side, real price) instead of one aggregate "set"
+        row with a precomputed payout. This is what lets
+        check_bracket_arbitrage_offload() sell an individual leg early as
+        its price decays, and lets the ordinary settle() function handle
+        settlement per-leg with no special-casing needed.
     """
     if "bracket_arbitrage" not in ACTIVE_STRATEGIES or len(markets) < 2:
         return
 
     cfg = ACTIVE_STRATEGIES["bracket_arbitrage"]
     rm = get_engines()["bracket_arbitrage"]
-    n = len(markets)
 
-    prices = []  # (ticker, yes_ask, no_ask)
+    legs = []  # (ticker, yes_ask, no_ask, measure, station_code)
     for m in markets:
         yes_ask = m.get("yes_ask")
         no_ask = m.get("no_ask")
@@ -274,30 +361,37 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
             no_ask = 100 - m["yes_bid"]
         if yes_ask is None or no_ask is None:
             return  # incomplete data for this event this cycle — skip rather than guess
-        prices.append((m["ticker"], yes_ask, no_ask))
+        legs.append((m["ticker"], yes_ask, no_ask, m.get("measure"), m.get("station_code")))
 
-    sum_yes = sum(p[1] for p in prices)
-    sum_no = sum(p[2] for p in prices)
+    sum_yes = sum(l[1] for l in legs)
 
     # Direction 1 (the common one): buy NO on every bracket. Exactly one
-    # loses (the winner), the other n-1 pay out $1 each. Profitable whenever
+    # loses (the winner), the rest pay out $1 each. Profitable whenever
     # sum_yes > 100 (Kalshi's normal overround/vig on a full bracket set).
     # Direction 2 (rare): buy YES on every bracket — profitable only if
     # sum_yes < 100, which would mean the set is underpriced overall.
     if sum_yes > 100:
         direction = "no"
-        per_bracket_prices = [p[2] for p in prices]  # no_ask per bracket
-        total_cost = sum_no
-        guaranteed_payout_per_set = 100 * (n - 1)
     elif sum_yes < 100:
         direction = "yes"
-        per_bracket_prices = [p[1] for p in prices]  # yes_ask per bracket
-        total_cost = sum_yes
-        guaranteed_payout_per_set = 100
     else:
         return  # exactly 100 — no edge either direction
 
-    gross_edge_per_set = guaranteed_payout_per_set - total_cost
+    def price_of(leg):
+        return leg[2] if direction == "no" else leg[1]  # no_ask or yes_ask
+
+    skip_cents = cfg.get("near_certain_skip_cents", BRACKET_NEAR_CERTAIN_SKIP_CENTS)
+    included = [l for l in legs if price_of(l) < skip_cents]
+    skipped_count = len(legs) - len(included)
+    if len(included) < 2:
+        return  # need at least 2 real legs for the hedge to mean anything
+
+    total_cost = sum(price_of(l) for l in included)
+    # Worst case for the legs we actually hold: the real winner turns out
+    # to be one of them (not one of the skipped near-certain-losers) — every
+    # OTHER included leg pays 100c, that one pays 0.
+    worst_case_payout = 100 * (len(included) - 1)
+    gross_edge_per_set = worst_case_payout - total_cost
     if gross_edge_per_set <= 0:
         return
 
@@ -310,34 +404,41 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
     # Real fee: a SEPARATE order per bracket, each at its own price — must
     # sum the real per-order fee, not apply the formula to the summed price
     # (the formula is non-linear, so that would give a wrong number).
-    total_fee_cents = sum(fees.taker_fee_cents(sets, p) for p in per_bracket_prices)
+    total_fee_cents = sum(fees.taker_fee_cents(sets, price_of(l)) for l in included)
     net_edge_per_set = gross_edge_per_set - (total_fee_cents / sets)
 
     if net_edge_per_set < cfg.get("min_edge_cents_override", 3):
         storage.log_decision(event_ticker, direction, total_cost, 1.0, int(net_edge_per_set),
-                              "skipped", f"gross edge {gross_edge_per_set}c doesn't clear "
-                              f"fee-adjusted minimum after {total_fee_cents}c total fees", "shadow")
+                              "skipped", f"worst-case edge {gross_edge_per_set}c doesn't clear "
+                              f"fee-adjusted minimum after {total_fee_cents}c total fees "
+                              f"({skipped_count} leg(s) skipped as near-certain)", "shadow")
         return
 
     approved, reason = rm.approve_trade(total_cost, int(net_edge_per_set), edge_already_net_of_fees=True)
     if not approved:
         return
 
-    storage.log_shadow_trade(
-        "bracket_arbitrage", event_ticker, f"set_{direction}", sets, total_cost,
-        precomputed_payout_cents=guaranteed_payout_per_set * sets,
-        sample_member_ticker=prices[0][0],
-    )
+    for ticker, yes_ask, no_ask, measure, station_code in included:
+        price = no_ask if direction == "no" else yes_ask
+        storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, price,
+                                  station_code=station_code, measure=measure)
     rm.record_fill(cost_cents=total_cost * sets)
 
 
 def settle_bracket_arbitrage(ticker_results: dict[str, tuple[bool, "str | None"]]) -> int:
     """
-    Bracket arbitrage's payout is fixed the moment the trade is placed
-    (see evaluate_bracket_set above) — it doesn't matter WHICH bracket
-    wins, only WHETHER the event has resolved yet. So this only needs to
-    poll one representative member ticker per open position, not figure
-    out the actual winning bracket.
+    LEGACY PATH ONLY — handles pre-refactor bracket_arbitrage rows that
+    still carry a precomputed_payout_cents/sample_member_ticker (one
+    aggregate row per set, from before legs were split individually). New
+    rows from evaluate_bracket_set() above don't set those fields, so this
+    function is a no-op for them by construction (the `if not sample_ticker`
+    check below skips straight past) — they settle through the ordinary
+    settle() function instead, same as every other strategy's trades,
+    since they're now just normal per-ticker 'no'/'yes' rows.
+
+    Kept rather than deleted so any bracket_arbitrage rows already sitting
+    open in the DB from before this refactor still settle correctly instead
+    of getting silently orphaned.
     """
     engines = get_engines()
     open_trades = storage.get_open_shadow_trades(strategy="bracket_arbitrage")
@@ -362,6 +463,60 @@ def settle_bracket_arbitrage(ticker_results: dict[str, tuple[bool, "str | None"]
         settled_count += 1
 
     return settled_count
+
+
+def check_bracket_arbitrage_offload() -> int:
+    """
+    For every still-open, per-leg bracket_arbitrage position (legacy
+    aggregate-set rows are skipped — they aren't individually sellable),
+    checks the leg's current market price and sells it early once that
+    price has decayed below both BRACKET_OFFLOAD_FLOOR_CENTS AND what we
+    paid for it — i.e. once the market is signaling this specific bracket
+    is very likely the actual loser — instead of holding every leg all the
+    way to settlement, where a true loser pays exactly 0. This salvages
+    whatever residual cents are still on the table rather than leaving
+    them on the floor for the guaranteed-zero outcome.
+
+    Deliberately conservative: never sells a leg that's still at or above
+    its entry price (that's not a decaying loser, that's just normal price
+    movement — nothing to salvage there) or above the floor (too early to
+    call it basically decided). Runs every cycle, independent of
+    settlement, same pattern as check_swing_exits().
+    """
+    engines = get_engines()
+    open_legs = storage.get_open_shadow_trades(strategy="bracket_arbitrage")
+    cfg = ACTIVE_STRATEGIES.get("bracket_arbitrage", {})
+    floor = cfg.get("offload_floor_cents", BRACKET_OFFLOAD_FLOOR_CENTS)
+    offloaded_count = 0
+
+    for trade in open_legs:
+        if trade.get("precomputed_payout_cents") is not None:
+            continue  # legacy aggregate-set row — not individually sellable
+
+        latest = storage.get_latest_price(trade["ticker"])
+        if not latest:
+            continue
+
+        side = trade["side"]
+        # Current value of what we hold: selling YES realizes yes_bid;
+        # selling NO realizes (100 - yes_ask) — same convention as
+        # check_swing_exits() uses for the same reason.
+        current_value = latest["yes_bid"] if side == "yes" else (
+            100 - latest["yes_ask"] if latest["yes_ask"] is not None else None
+        )
+        if current_value is None:
+            continue
+        if current_value >= floor or current_value >= trade["price_cents"]:
+            continue  # not decaying, or not decayed enough yet — leave it
+
+        pnl_cents = (current_value - trade["price_cents"]) * trade["count"]
+        storage.close_shadow_trade_sold(trade["id"], pnl_cents)
+        rm = engines.get("bracket_arbitrage")
+        if rm:
+            rm.record_settlement(pnl_cents)
+        offloaded_count += 1
+
+    return offloaded_count
 
 
 def check_swing_exits() -> int:
