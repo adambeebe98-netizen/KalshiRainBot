@@ -25,6 +25,7 @@ model built before you have that data is just a fancier way to be wrong.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Optional
 
 import calibration
@@ -90,6 +91,125 @@ def estimate_precip_probability(
 
 def market_implied_probability(yes_price_cents: int) -> float:
     return yes_price_cents / 100.0
+
+
+# --- Temperature model ---
+#
+# Same "simple, inspectable" philosophy as the rain model above, extended to
+# temperature_high/temperature_low markets — which previously had NO
+# calibrated model at all (evaluate_market was being called on them by
+# mistake, applying precipitation logic to a temperature question, which is
+# meaningless). This fixes that by giving temperature markets their own path.
+#
+# The forecast NWS gives you (tomorrow's high will be ~85F) is a point
+# estimate, not a probability — but NWS's own day-1/day-2 high/low forecasts
+# are typically accurate to within a few degrees F. Modeling forecast error
+# as roughly Normal(mu=forecast, sigma=FORECAST_STD_DEV_F) turns that point
+# estimate into a probability the actual reading falls inside a given
+# threshold band — coarse and deliberately inspectable, not fitted to
+# historical data (there isn't any yet — that's what paper trading is for).
+FORECAST_STD_DEV_F = 4.0
+
+
+def estimate_temperature_probability(
+    observed_temp_f: Optional[float],
+    forecast_temp_f: Optional[float],
+    threshold_low_f: Optional[float],
+    threshold_high_f: Optional[float],
+) -> tuple[float, str]:
+    """
+    Returns (probability the actual reading falls within
+    [threshold_low_f, threshold_high_f], rationale). Either threshold bound
+    can be None for an open-ended market (e.g. 'above 85F' has no upper
+    bound); both None means rules_extractor couldn't parse a usable
+    threshold, which returns genuine 0.5 uncertainty rather than guessing.
+    """
+    notes = []
+    if observed_temp_f is not None:
+        notes.append(f"current observed temp {observed_temp_f:.0f}F")
+
+    if forecast_temp_f is None:
+        notes.append("no forecast temperature available for the relevant period")
+        return 0.5, "; ".join(notes)
+
+    if threshold_low_f is None and threshold_high_f is None:
+        notes.append("no usable threshold parsed from rules text")
+        return 0.5, "; ".join(notes)
+
+    notes.append(f"forecast temp {forecast_temp_f:.0f}F vs threshold "
+                 f"[{threshold_low_f if threshold_low_f is not None else '-inf'}, "
+                 f"{threshold_high_f if threshold_high_f is not None else '+inf'}], "
+                 f"assumed forecast error stddev {FORECAST_STD_DEV_F:.0f}F")
+
+    dist = NormalDist(mu=forecast_temp_f, sigma=FORECAST_STD_DEV_F)
+    # +/-0.5F treats a whole-degree threshold as covering its rounding band
+    # (e.g. "85F or higher" resolving true at a recorded 85 rounds to
+    # covering [84.5, +inf)) — a small, deliberate, documented fudge rather
+    # than a silent off-by-one at the boundary.
+    if threshold_low_f is not None and threshold_high_f is not None:
+        prob = dist.cdf(threshold_high_f + 0.5) - dist.cdf(threshold_low_f - 0.5)
+    elif threshold_low_f is not None:
+        prob = 1 - dist.cdf(threshold_low_f - 0.5)
+    else:
+        prob = dist.cdf(threshold_high_f + 0.5)
+
+    prob = max(0.01, min(0.99, prob))
+    return prob, "; ".join(notes)
+
+
+def pick_relevant_forecast_temp_f(measure: str, forecast: list[PrecipForecast]) -> Optional[float]:
+    """
+    temperature_high markets settle on a daytime high, temperature_low on
+    an overnight low — pick the first forecast period matching that, since
+    NWS periods alternate day/night and the nearest one is the relevant
+    settlement window for a same-day/next-day market.
+    """
+    want_daytime = measure == "temperature_high"
+    for period in forecast:
+        if period.is_daytime == want_daytime and period.temperature_f is not None:
+            return period.temperature_f
+    return None
+
+
+def evaluate_temperature_market(
+    ticker: str,
+    yes_price_cents: int,
+    rules: MarketRules,
+    observation: Optional[StationObservation],
+    forecast: list[PrecipForecast],
+) -> TradeSignal:
+    forecast_temp_f = pick_relevant_forecast_temp_f(rules.measure, forecast)
+    observed_temp_f = observation.temperature_f if observation else None
+
+    raw_model_p, rationale = estimate_temperature_probability(
+        observed_temp_f, forecast_temp_f, rules.threshold_low_f, rules.threshold_high_f
+    )
+
+    model_p, calibration_note = calibration.apply_calibration(
+        raw_model_p, rules.station_code, rules.measure
+    )
+    rationale = f"{rationale}; calibration: {calibration_note}"
+
+    market_p = market_implied_probability(yes_price_cents)
+
+    yes_edge = round((model_p - market_p) * 100)
+    no_edge = round(((1 - model_p) - (1 - market_p)) * 100)
+
+    if yes_edge >= no_edge:
+        side, edge_cents, price = "yes", yes_edge, yes_price_cents
+    else:
+        side, edge_cents, price = "no", no_edge, 100 - yes_price_cents
+
+    confidence_note = f" [rules confidence: {rules.confidence}, source: {rules.settlement_source}]"
+    return TradeSignal(
+        ticker=ticker,
+        side=side,
+        model_probability=model_p if side == "yes" else 1 - model_p,
+        model_probability_yes=model_p,
+        market_implied_probability=market_p if side == "yes" else 1 - market_p,
+        edge_cents=edge_cents,
+        rationale=rationale + confidence_note,
+    )
 
 
 def evaluate_market(
