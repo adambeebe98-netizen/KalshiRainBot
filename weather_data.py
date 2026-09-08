@@ -25,15 +25,26 @@ class StationObservation:
     station_id: str
     precipitation_last_hour_mm: Optional[float]
     precipitation_last_3hr_mm: Optional[float]
+    temperature_f: Optional[float]  # converted from NWS's Celsius observation
     description: str
     timestamp: str
 
 
 @dataclass
 class PrecipForecast:
+    """
+    Name kept as-is for backward compatibility with existing callers, but
+    this now carries the full forecast period — including temperature and
+    is_daytime — since it's the SAME NWS periods payload either way and a
+    second fetch would just be wasteful. Used by both the precipitation
+    model (strategy.estimate_precip_probability) and the temperature model
+    (strategy.estimate_temperature_probability).
+    """
     period_name: str
     probability_of_precipitation_pct: Optional[int]
     short_forecast: str
+    temperature_f: Optional[float]
+    is_daytime: Optional[bool]
 
 
 def get_station_latest_observation(station_id: str) -> Optional[StationObservation]:
@@ -46,10 +57,13 @@ def get_station_latest_observation(station_id: str) -> Optional[StationObservati
         data = resp.json().get("properties", {})
         precip_1h = (data.get("precipitationLastHour") or {}).get("value")
         precip_3h = (data.get("precipitationLast3Hours") or {}).get("value")
+        temp_c = (data.get("temperature") or {}).get("value")
+        temp_f = (temp_c * 9 / 5 + 32) if temp_c is not None else None
         return StationObservation(
             station_id=station_id,
             precipitation_last_hour_mm=precip_1h,
             precipitation_last_3hr_mm=precip_3h,
+            temperature_f=temp_f,
             description=data.get("textDescription", ""),
             timestamp=data.get("timestamp", ""),
         )
@@ -75,6 +89,8 @@ def get_forecast_pop(lat: float, lon: float) -> list[PrecipForecast]:
                 period_name=p.get("name", ""),
                 probability_of_precipitation_pct=pop,
                 short_forecast=p.get("shortForecast", ""),
+                temperature_f=p.get("temperature"),  # NWS returns this in temperatureUnit, "F" by default for this endpoint
+                is_daytime=p.get("isDaytime"),
             ))
         return out
 
