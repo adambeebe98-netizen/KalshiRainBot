@@ -36,6 +36,7 @@ sys.path.insert(0, str(APP_DIR))
 import storage  # noqa: E402
 import shadow  # noqa: E402
 import reporting  # noqa: E402
+import categories  # noqa: E402
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -177,7 +178,7 @@ DASHBOARD_PAGE = """
   <table style="margin-top:16px;">
     <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days tracked</th></tr>
     {% for s in shadow_summary %}
-    <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 else '' }}>
+    <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 and s.enough_data else '' }}>
       <td>{{ s.rank }}</td>
       <td>{{ s.strategy }}</td>
       <td>${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</td>
@@ -191,9 +192,49 @@ DASHBOARD_PAGE = """
       </td>
       <td>{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</td>
     </tr>
+    {% if not s.enough_data %}
+    <tr><td></td><td colspan="7" class="warn" style="font-size:12px;">
+      ⚠ Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.
+    </td></tr>
+    {% endif %}
     {% endfor %}
     {% if not shadow_summary %}<tr><td colspan="8">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
   </table>
+</div>
+
+<div class="card">
+  <h2>By category <span style="font-size:12px;color:#8b949e;">(same paper trades, split by what kind of market they're on — some categories may just never be profitable, and that's a real finding, not a bug)</span></h2>
+  {% for cat, data in category_summary.items() %}
+  <div style="border:1px solid #30363d;border-radius:6px;padding:14px;margin-bottom:14px;">
+    <h3 style="margin:0 0 6px 0;">
+      {{ cat }}
+      <span class="{{ 'ok' if (data.overall.total_pnl_cents or 0) >= 0 else 'err' }}" style="font-size:14px;margin-left:10px;">
+        {{ "%+.1f%%"|format(data.overall.roi_pct) if data.overall.roi_pct is not none else "—" }} ROI
+      </span>
+      <span style="font-size:12px;color:#8b949e;margin-left:10px;">
+        {{ data.overall.settled }} settled · {{ "%.0f%%"|format(data.overall.win_rate*100) if data.overall.win_rate is not none else "—" }} win rate
+      </span>
+    </h3>
+    {% if not data.overall.enough_data %}
+    <p class="warn" style="font-size:12px;margin:4px 0 10px 0;">
+      ⚠ Only {{ data.overall.settled }}/{{ min_sample_size }} settled trades in this category overall — too early to call this category profitable or not.
+    </p>
+    {% endif %}
+    <table>
+      <tr><th>#</th><th>Strategy</th><th>Settled</th><th>Win rate</th><th>ROI</th></tr>
+      {% for s in data.strategies %}
+      <tr>
+        <td>{{ s.rank }}</td>
+        <td>{{ s.strategy }}{% if not s.enough_data %} <span class="warn" style="font-size:11px;">(low data)</span>{% endif %}</td>
+        <td>{{ s.settled }}</td>
+        <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
+        <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endfor %}
+  {% if not category_summary %}<p style="color:#8b949e;">No settled trades yet — categories will appear once shadow trades resolve.</p>{% endif %}
 </div>
 
 <div class="card">
@@ -340,7 +381,7 @@ def dashboard():
                 calibration_rows.append({
                     "station": r["station_code"], "measure": r["measure"], "n": n,
                     "model_avg": f"{model_avg:.2f}", "actual_avg": f"{actual_avg:.2f}",
-                    "bias": f"{(actual_avg - model_avg):+.2f}" if n >= 20 else "not enough data",
+                    "bias": f"{(actual_avg - model_avg):+.2f}" if n >= categories.MIN_SAMPLE_SIZE else "not enough data",
                 })
     except Exception:
         pass  # DB may not exist yet on first run
@@ -348,9 +389,11 @@ def dashboard():
     bankroll = storage.load_last_bankroll(int(env.get("STARTING_BANKROLL_CENTS", "50000")))
 
     shadow_summary = []
+    category_summary = {}
     chart_data = {}
     try:
         shadow_summary = storage.get_shadow_summary()
+        category_summary = storage.get_shadow_summary_by_category()
         for name in shadow.STRATEGIES.keys():
             history = storage.get_shadow_bankroll_history(name, limit=500)
             if history:
@@ -367,6 +410,8 @@ def dashboard():
         trades=trades,
         calibration_rows=calibration_rows,
         shadow_summary=shadow_summary,
+        category_summary=category_summary,
+        min_sample_size=categories.MIN_SAMPLE_SIZE,
         chart_data=chart_data,
         suggestions=storage.get_suggestions(status="pending"),
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
