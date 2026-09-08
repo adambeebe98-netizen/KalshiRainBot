@@ -477,6 +477,39 @@ def get_shadow_summary_by_category() -> dict[str, dict]:
     return dict(sorted(result.items(), key=lambda kv: kv[1]["overall"]["total_pnl_cents"], reverse=True))
 
 
+def get_category_pnl_over_time() -> dict[str, list[tuple[int, int]]]:
+    """
+    Cumulative P&L over time per category (Rain/Temperature/Other), for
+    charting. Unlike get_shadow_bankroll_history (per-strategy, from
+    periodic snapshots), this is built directly from settled_ts + pnl_cents
+    on shadow_trades — every strategy's settled trades in a category are
+    summed together, running-total style, ordered by settlement time. No
+    new table needed since shadow_trades already has everything required.
+
+    Returns {category: [(ts, cumulative_pnl_cents), ...]}, oldest first.
+    Categories with zero settled trades are simply absent from the dict —
+    same "shows up once it has data" behavior as get_shadow_summary_by_category.
+    """
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT measure, settled_ts, pnl_cents FROM shadow_trades "
+            "WHERE status IN ('won','lost','sold') AND settled_ts IS NOT NULL "
+            "ORDER BY settled_ts ASC"
+        ).fetchall()
+
+    from collections import defaultdict
+    running: dict[str, int] = defaultdict(int)
+    series: dict[str, list[tuple[int, int]]] = defaultdict(list)
+
+    for r in rows:
+        cat = category_for(r["measure"])
+        running[cat] += r["pnl_cents"] or 0
+        series[cat].append((r["settled_ts"], running[cat]))
+
+    return dict(series)
+
+
 # ---------- price history (raw material for swing-strategy design) ----------
 
 def log_price_snapshot(ticker: str, yes_ask: int | None, yes_bid: int | None) -> None:
