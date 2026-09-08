@@ -200,32 +200,68 @@ class KalshiClient:
 
     def create_order(self, ticker: str, side: str, action: str, count: int,
                       price_cents: int, order_type: str = "limit",
+                      time_in_force: str = "good_till_canceled",
                       client_order_id: Optional[str] = None) -> dict:
         """
-        side: 'yes' or 'no'
-        action: 'buy' or 'sell'
-        price_cents: limit price in cents (1-99)
+        Public signature kept as (side: 'yes'/'no', action: 'buy'/'sell',
+        price_cents: 1-99) for backward compatibility with existing callers
+        (bot.py). Internally translated to Kalshi's CURRENT V2 order schema,
+        confirmed against docs.kalshi.com/api-reference/orders/create-order-v2
+        on 2026-09-08:
 
-        ⚠️ UNVERIFIED AGAINST THE LIVE API — deliberately blocked from running
-        live (see config.SETTINGS.order_schema_verified / bot.py's live-mode
-        guard) until someone confirms this. Multiple independent sources
-        report Kalshi deprecated the integer-cents order endpoint this body
-        targets sometime around June 2026, migrating to fixed-point decimal
-        fields (price as a decimal-string dollar amount, count as a
-        fixed-point string) — this method was never updated to match.
-        Do not remove the order_schema_verified guard until a real test
-        order has actually been confirmed to work against the live API.
+          POST /portfolio/events/orders
+          {
+            "ticker": ...,
+            "side": "bid" | "ask",       # NOT "yes"/"no" — V2 quotes
+                                          # everything from the YES leg only:
+                                          # bid = buy YES, ask = sell YES
+                                          # (selling YES == buying NO at 1-price)
+            "count": "<fixed-point string, up to 2 decimals>",
+            "price": "<fixed-point dollar string, e.g. '0.5600'>",
+            "time_in_force": "good_till_canceled" | "fill_or_kill" | "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross" | "maker",
+            "client_order_id": ...
+          }
+
+        Response shape also changed: order_id/fill_count/remaining_count/ts_ms
+        come back FLAT (no "order" wrapper like the legacy endpoint had) —
+        callers reading order["order"]["order_id"] need to read order["order_id"]
+        instead (bot.py updated to match).
+
+        The old integer-cents legacy endpoint (/portfolio/orders) still works
+        per Kalshi's docs (deprecated no earlier than May 6, 2026, not yet
+        removed as of this writing), but their own quick-start guide now
+        defaults to V2, so this migrates rather than patching the legacy path.
+
+        yes/no + buy/sell -> bid/ask + YES-leg price, derived as:
+          v2_side = 'bid' if (side == 'yes') == (action == 'buy') else 'ask'
+          yes_price_cents = price_cents if side == 'yes' else (100 - price_cents)
+        (buying NO at P is economically selling YES at 1-P, and vice versa.)
+
+        ⚠️ Schema now matches Kalshi's published docs, but published docs and
+        live behavior aren't guaranteed identical — this has NOT been
+        confirmed against a real order on the live API. Do not remove the
+        order_schema_verified guard (config.SETTINGS.order_schema_verified /
+        bot.py's live-mode check) until an actual test order has been placed
+        and confirmed to work.
         """
+        is_yes = side == "yes"
+        is_buy = action == "buy"
+        v2_side = "bid" if is_yes == is_buy else "ask"
+        yes_price_cents = price_cents if is_yes else (100 - price_cents)
+
         body = {
             "ticker": ticker,
-            "side": side,
-            "action": action,
-            "count": count,
-            "type": order_type,
-            "yes_price" if side == "yes" else "no_price": price_cents,
+            "side": v2_side,
+            "count": f"{count:.2f}",
+            "price": f"{yes_price_cents / 100:.4f}",
+            "time_in_force": time_in_force,
+            "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": client_order_id or f"bot-{int(time.time()*1000)}",
         }
-        return self._request("POST", "/portfolio/orders", json_body=body)
+        return self._request("POST", "/portfolio/events/orders", json_body=body)
 
     def cancel_order(self, order_id: str) -> dict:
-        return self._request("DELETE", f"/portfolio/orders/{order_id}")
+        # V2 path — legacy was /portfolio/orders/{order_id}. Response shape
+        # is also flat: {order_id, client_order_id, reduced_by}.
+        return self._request("DELETE", f"/portfolio/events/orders/{order_id}")
