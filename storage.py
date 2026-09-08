@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 
 from config import SETTINGS
+from categories import category_for, MIN_SAMPLE_SIZE
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -390,11 +391,90 @@ def get_shadow_summary() -> list[dict]:
                 "bankroll_cents": bankroll_row["bankroll_cents"] if bankroll_row else None,
                 "roi_pct": (total_pnl / SETTINGS.starting_bankroll_cents * 100) if SETTINGS.starting_bankroll_cents else None,
                 "days_tracked": max(0, (time.time() - first_ts) / 86400) if first_ts else None,
+                "enough_data": n >= MIN_SAMPLE_SIZE,
             })
         summary.sort(key=lambda row: row["total_pnl_cents"], reverse=True)
         for i, row in enumerate(summary, start=1):
             row["rank"] = i
         return summary
+
+
+def get_shadow_summary_by_category() -> dict[str, dict]:
+    """
+    Same idea as get_shadow_summary(), but split by trading category (Rain /
+    Temperature / Other — see categories.py) instead of lumping every
+    market type into one number. Each category gets its own 'overall' line
+    (every strategy combined, for "is this category worth trading at all")
+    plus a per-strategy leaderboard within that category, sorted best-to-
+    worst by total P&L. Categories themselves are sorted the same way.
+
+    Only counts SETTLED trades (won/lost/sold) — open positions have no P&L
+    yet and would just add noise to a "which category actually wins" view.
+
+    ROI% uses the same SETTINGS.starting_bankroll_cents denominator as
+    get_shadow_summary(), so category ROI numbers are directly comparable to
+    each other and to the overall per-strategy leaderboard — there's no
+    separate bankroll per category, since all shadow strategies trade every
+    category from one shared paper bankroll.
+    """
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT strategy, measure, pnl_cents FROM shadow_trades WHERE status IN ('won','lost','sold')"
+        ).fetchall()
+
+    from collections import defaultdict
+    per_strategy: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(lambda: {"settled": 0, "wins": 0, "total_pnl": 0}))
+    per_category: dict[str, dict] = defaultdict(lambda: {"settled": 0, "wins": 0, "total_pnl": 0})
+
+    for r in rows:
+        cat = category_for(r["measure"])
+        pnl = r["pnl_cents"] or 0
+        strat_bucket = per_strategy[cat][r["strategy"]]
+        strat_bucket["settled"] += 1
+        strat_bucket["total_pnl"] += pnl
+        if pnl > 0:
+            strat_bucket["wins"] += 1
+        cat_bucket = per_category[cat]
+        cat_bucket["settled"] += 1
+        cat_bucket["total_pnl"] += pnl
+        if pnl > 0:
+            cat_bucket["wins"] += 1
+
+    def roi(total_pnl: int) -> float | None:
+        return (total_pnl / SETTINGS.starting_bankroll_cents * 100) if SETTINGS.starting_bankroll_cents else None
+
+    result = {}
+    for cat, strat_map in per_strategy.items():
+        strategies = []
+        for strat, b in strat_map.items():
+            n = b["settled"]
+            strategies.append({
+                "strategy": strat,
+                "settled": n,
+                "win_rate": b["wins"] / n if n else None,
+                "total_pnl_cents": b["total_pnl"],
+                "roi_pct": roi(b["total_pnl"]),
+                "enough_data": n >= MIN_SAMPLE_SIZE,
+            })
+        strategies.sort(key=lambda row: row["total_pnl_cents"], reverse=True)
+        for i, row in enumerate(strategies, start=1):
+            row["rank"] = i
+
+        cat_bucket = per_category[cat]
+        n = cat_bucket["settled"]
+        result[cat] = {
+            "overall": {
+                "settled": n,
+                "win_rate": cat_bucket["wins"] / n if n else None,
+                "total_pnl_cents": cat_bucket["total_pnl"],
+                "roi_pct": roi(cat_bucket["total_pnl"]),
+                "enough_data": n >= MIN_SAMPLE_SIZE,
+            },
+            "strategies": strategies,
+        }
+
+    return dict(sorted(result.items(), key=lambda kv: kv[1]["overall"]["total_pnl_cents"], reverse=True))
 
 
 # ---------- price history (raw material for swing-strategy design) ----------
