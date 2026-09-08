@@ -42,6 +42,8 @@ from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
 from strategy import evaluate_market, evaluate_temperature_market
 from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE
+import depth_sizing
+import fees
 import settlement
 import shadow
 import storage
@@ -196,8 +198,49 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                       signal.edge_cents, "skipped", reason, mode)
                 continue
 
-            price = yes_price if signal.side == "yes" else 100 - yes_price
-            contracts = risk.max_contracts_for_trade(price)
+            quoted_price = yes_price if signal.side == "yes" else 100 - yes_price
+            flat_cap_contracts = risk.max_contracts_for_trade(quoted_price)
+
+            # Real depth-aware sizing (see depth_sizing.py): the quoted
+            # top-of-book price only holds for the first few contracts —
+            # walking further into the book to fill a bigger order raises
+            # the real average price you'd pay. This finds the largest size
+            # (up to the flat bankroll-pct cap above) whose NET, post-fee,
+            # real-fill-price expected edge still clears the minimum —
+            # rather than assuming the quoted price holds at any size, which
+            # would overstate edge (and, during paper trading, overstate how
+            # good the strategy actually is). Scoped to the main bot's trade
+            # path only for now, not the 7 shadow strategies — see shadow.py
+            # if extending this there later; that's a real extra API call
+            # per candidate trade, multiplied by every shadow strategy, so
+            # it wasn't added there without deciding that tradeoff on purpose.
+            try:
+                yes_bids, no_bids = kalshi.get_orderbook_levels(ticker)
+            except Exception as e:
+                log.warning(f"Orderbook fetch failed for {ticker}, skipping: {e}")
+                storage.log_decision(ticker, signal.side, yes_price, signal.model_probability,
+                                      signal.edge_cents, "skipped", f"orderbook fetch failed: {e}", mode)
+                continue
+
+            # Buying YES is matched against resting NO bids (inverted to
+            # implied YES asks); buying NO is matched against resting YES
+            # bids (inverted to implied NO asks) — see depth_sizing.py's
+            # module docstring for why this inversion is correct.
+            opposite_bids = no_bids if signal.side == "yes" else yes_bids
+            ask_levels = depth_sizing.implied_ask_levels(opposite_bids)
+
+            fill = depth_sizing.find_max_profitable_size(
+                ask_levels, fees.taker_fee_cents, signal.model_probability,
+                max_contracts_cap=flat_cap_contracts, min_net_edge_cents=risk.preset.min_edge_cents,
+            )
+            if fill is None:
+                storage.log_decision(ticker, signal.side, yes_price, signal.model_probability,
+                                      signal.edge_cents, "skipped",
+                                      "no size clears net-of-fee edge at real order book depth", mode)
+                continue
+
+            contracts = fill.contracts_fillable
+            price = round(fill.avg_price_cents)  # real volume-weighted fill price, not just the quote
 
             storage.log_decision(ticker, signal.side, yes_price, signal.model_probability,
                                   signal.edge_cents, "traded", signal.rationale, mode)
@@ -213,14 +256,16 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                     # wrapper — see kalshi_client.create_order()'s docstring.
                     order_id = order.get("order_id")
                     log.info(f"LIVE order placed: {ticker} {signal.side} x{contracts} @ {price}c "
-                             f"(edge {signal.edge_cents}c) — {order_id}")
+                             f"(edge {signal.edge_cents}c, depth-walked avg fill ~{fill.avg_price_cents:.1f}c"
+                             f"{', book exhausted' if fill.exhausted_book else ''}) — {order_id}")
                 except Exception as e:
                     log.error(f"Order failed for {ticker}: {e}")
                     continue
             else:
                 order_id = None
                 log.info(f"PAPER trade: {ticker} {signal.side} x{contracts} @ {price}c "
-                         f"(edge {signal.edge_cents}c) — {signal.rationale}")
+                         f"(edge {signal.edge_cents}c, depth-walked avg fill ~{fill.avg_price_cents:.1f}c"
+                         f"{', book exhausted' if fill.exhausted_book else ''}) — {signal.rationale}")
 
             storage.log_trade(ticker, signal.side, contracts, price, mode, order_id,
                                model_probability=signal.model_probability_yes,
