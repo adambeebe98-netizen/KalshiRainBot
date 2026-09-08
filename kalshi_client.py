@@ -98,6 +98,38 @@ class KalshiClient:
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
         return self._request("GET", f"/markets/{ticker}/orderbook", params={"depth": depth})
 
+    def get_orderbook_levels(self, ticker: str, depth: int = 50) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+        """
+        Returns (yes_bid_levels, no_bid_levels), each a list of (price_cents,
+        count) sorted BEST PRICE FIRST (i.e. highest first — reversed from
+        Kalshi's own ascending order, since that's the order you'd actually
+        walk to fill a market order).
+
+        Confirmed against Kalshi's own docs (docs.kalshi.com/getting_started/
+        orderbook_responses): the API returns BIDS ONLY, as
+        {"orderbook_fp": {"yes_dollars": [[price_dollars_str, count_fp_str], ...],
+        "no_dollars": [...]}}, sorted ascending by price. There is no
+        separate ask array — an ask on one side is derived from the best
+        bid on the OTHER side (yes_ask = 100 - best_no_bid_cents, and
+        vice versa). See implied_ask_levels() below for that conversion.
+        """
+        raw = self.get_orderbook(ticker, depth=depth)
+        book = raw.get("orderbook_fp", raw.get("orderbook", {}))
+
+        def parse_levels(raw_levels) -> list[tuple[int, int]]:
+            levels = []
+            for entry in raw_levels or []:
+                price_str, count_str = entry[0], entry[1]
+                price_cents = round(float(price_str) * 100)
+                count = round(float(count_str))
+                levels.append((price_cents, count))
+            levels.sort(key=lambda x: x[0], reverse=True)  # best (highest) price first
+            return levels
+
+        yes_bids = parse_levels(book.get("yes_dollars"))
+        no_bids = parse_levels(book.get("no_dollars"))
+        return yes_bids, no_bids
+
     def get_market_rules_text(self, ticker: str) -> str:
         """
         Kalshi generally publishes rules as a linked PDF/text per market series
@@ -107,6 +139,40 @@ class KalshiClient:
         """
         market = self.get_market(ticker).get("market", {})
         return market.get("rules_primary", "") or market.get("rules_secondary", "") or ""
+
+    def get_series_list(self, limit: int = 200, cursor: Optional[str] = None) -> dict:
+        """
+        GET /series — browse ALL series templates Kalshi currently has
+        listed. Used for auto-discovering every rain series (one per city)
+        instead of hardcoding a city list that goes stale the moment Kalshi
+        adds or removes a city.
+        """
+        params = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/series", params=params)
+
+    def discover_series_tickers(self, keyword: str) -> list[str]:
+        """
+        Paginates through the full series list and returns every ticker
+        whose ticker OR title contains `keyword` (case-insensitive) — e.g.
+        keyword='rain' finds KXRAIN, KXRAINNYC, KXRAINAUS, etc, whatever
+        Kalshi currently has listed, without needing a maintained city list.
+        """
+        matches = []
+        cursor = None
+        keyword_lower = keyword.lower()
+        for _ in range(20):  # hard cap on pagination loops, just in case
+            resp = self.get_series_list(cursor=cursor)
+            for series in resp.get("series", []):
+                ticker = series.get("ticker", "")
+                title = series.get("title", "")
+                if keyword_lower in ticker.lower() or keyword_lower in title.lower():
+                    matches.append(ticker)
+            cursor = resp.get("cursor")
+            if not cursor:
+                break
+        return matches
 
     def get_market_settlement(self, ticker: str) -> tuple[bool, Optional[str]]:
         """
@@ -139,6 +205,16 @@ class KalshiClient:
         side: 'yes' or 'no'
         action: 'buy' or 'sell'
         price_cents: limit price in cents (1-99)
+
+        ⚠️ UNVERIFIED AGAINST THE LIVE API — deliberately blocked from running
+        live (see config.SETTINGS.order_schema_verified / bot.py's live-mode
+        guard) until someone confirms this. Multiple independent sources
+        report Kalshi deprecated the integer-cents order endpoint this body
+        targets sometime around June 2026, migrating to fixed-point decimal
+        fields (price as a decimal-string dollar amount, count as a
+        fixed-point string) — this method was never updated to match.
+        Do not remove the order_schema_verified guard until a real test
+        order has actually been confirmed to work against the live API.
         """
         body = {
             "ticker": ticker,
