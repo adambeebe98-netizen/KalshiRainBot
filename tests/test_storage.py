@@ -30,6 +30,55 @@ def _clear(*tables):
         conn.commit()
 
 
+class TestMarkToMarket(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades", "shadow_bankroll_snapshots", "price_history")
+
+    def test_yes_position_marks_to_current_bid(self):
+        storage.log_price_snapshot("T1", yes_ask=None, yes_bid=55)
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "swing")
+        self.assertEqual(row["open_capital_cents"], 400)
+        self.assertEqual(row["current_value_cents"], 550)
+        self.assertEqual(row["unrealized_pnl_cents"], 150)
+
+    def test_no_position_marks_via_inverted_yes_ask(self):
+        storage.log_price_snapshot("T2", yes_ask=25, yes_bid=None)
+        storage.log_shadow_trade("calibrated_balanced", "T2", "no", 10, 60)
+        storage.snapshot_shadow_bankroll("calibrated_balanced", 50000)
+        row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "calibrated_balanced")
+        self.assertEqual(row["current_value_cents"], 750)  # 10 * (100-25)
+        self.assertEqual(row["unrealized_pnl_cents"], 150)
+
+    def test_both_side_arbitrage_position_is_locked_at_100c_per_contract(self):
+        """Dutch-book arbitrage doesn't fluctuate with price the way a
+        directional position does -- it's already guaranteed at entry."""
+        storage.log_shadow_trade("arbitrage", "T3", "both", 5, 90)
+        storage.snapshot_shadow_bankroll("arbitrage", 50000)
+        row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "arbitrage")
+        self.assertEqual(row["open_capital_cents"], 450)
+        self.assertEqual(row["current_value_cents"], 500)  # 5 * 100, unaffected by any price_history
+
+    def test_falls_back_to_cost_basis_with_no_price_data(self):
+        """No fabricated gain/loss when there's genuinely no current quote
+        to mark against."""
+        storage.log_shadow_trade("longshot", "T4", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("longshot", 50000)
+        row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "longshot")
+        self.assertEqual(row["current_value_cents"], row["open_capital_cents"])
+        self.assertEqual(row["unrealized_pnl_cents"], 0)
+
+    def test_settled_trades_are_never_included_in_mark_to_market(self):
+        tid = storage.log_shadow_trade("swing", "T5", "yes", 10, 40)
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+        storage.snapshot_shadow_bankroll("swing", 50600)
+        row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "swing")
+        self.assertEqual(row["open"], 0)
+        self.assertEqual(row["current_value_cents"], 0)
+
+
 class TestTodaysRealizedPnl(unittest.TestCase):
     def setUp(self):
         storage.init_db()
