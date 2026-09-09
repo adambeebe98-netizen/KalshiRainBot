@@ -51,6 +51,16 @@ class RiskPreset:
     # max_position_pct of bankroll, AND never chase size the book can't
     # reasonably absorb without hurting the fill.
     max_contracts_per_trade: int = 25
+    # Tier-differentiated, separate from max_contracts_per_trade above:
+    # that's a flat count regardless of how the book is shaped; this caps
+    # how far the average fill price is allowed to drift from the best
+    # quote (e.g. buying at an average of 60c when the best quote was 55c
+    # is 5c of slippage) — see find_max_profitable_size's docstring in
+    # depth_sizing.py for why this is the more precise version of the same
+    # protection. An aggressive strategy tolerating more slippage is the
+    # same idea as it already tolerating a smaller min_edge_cents — it's
+    # choosing to accept more price impact in exchange for size.
+    max_slippage_cents: int = 6
 
 
 def default_preset() -> RiskPreset:
@@ -64,6 +74,7 @@ def default_preset() -> RiskPreset:
         max_contract_price_cents=SETTINGS.max_contract_price_cents,
         max_open_positions=SETTINGS.max_open_positions,
         max_contracts_per_trade=SETTINGS.max_contracts_per_trade,
+        max_slippage_cents=SETTINGS.max_slippage_cents,
     )
 
 
