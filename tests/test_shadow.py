@@ -198,5 +198,110 @@ class TestRationaleCapture(unittest.TestCase):
         self.assertIn("pipeline smoke test", row[0])
 
 
+class TestPerformanceDampening(unittest.TestCase):
+    """Covers the automatic, mechanical cold-streak circuit breaker — the
+    one piece of "learning" in this system that's genuinely fully
+    automatic (no human click needed), which is only safe because it can
+    provably only ever REDUCE position size, never increase it above the
+    normal tier baseline."""
+
+    def test_pure_function_never_returns_above_1_across_a_wide_sweep(self):
+        """THE core safety property, checked directly against the pure
+        decision function (not just via integration)."""
+        for trades in range(0, 50):
+            for roi in (-1000, -100, -50, -20, -15, -14, -5, 0, 5, 50, 1000):
+                result = shadow.performance_dampening_multiplier({"trades": trades, "roi_pct": roi})
+                self.assertLessEqual(result, 1.0)
+
+    def test_no_dampening_below_the_minimum_trade_count(self):
+        self.assertEqual(
+            shadow.performance_dampening_multiplier({"trades": 5, "roi_pct": -50.0}), 1.0)
+
+    def test_no_dampening_with_healthy_performance(self):
+        self.assertEqual(
+            shadow.performance_dampening_multiplier({"trades": 20, "roi_pct": 10.0}), 1.0)
+
+    def test_dampens_on_a_genuine_cold_streak(self):
+        self.assertEqual(
+            shadow.performance_dampening_multiplier({"trades": 20, "roi_pct": -20.0}),
+            shadow.COLD_STREAK_DAMPENING_MULTIPLIER)
+
+    def test_boundary_is_inclusive(self):
+        self.assertEqual(
+            shadow.performance_dampening_multiplier(
+                {"trades": 20, "roi_pct": shadow.COLD_STREAK_ROI_THRESHOLD_PCT}),
+            shadow.COLD_STREAK_DAMPENING_MULTIPLIER)
+
+    def test_just_above_threshold_is_not_dampened(self):
+        self.assertEqual(
+            shadow.performance_dampening_multiplier(
+                {"trades": 20, "roi_pct": shadow.COLD_STREAK_ROI_THRESHOLD_PCT + 0.1}),
+            1.0)
+
+
+class TestPerformanceDampeningIntegration(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_a_real_cold_streak_automatically_reduces_position_size(self):
+        for i in range(20):
+            tid = storage.log_shadow_trade("calibrated_conservative", f"COLD{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        for i in range(20):
+            tid = storage.log_shadow_trade("calibrated_aggressive", f"HOT{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+
+        # A real 20-trade cold streak would span days or weeks, not one
+        # instant — by the time a NEW trade is being evaluated, the DAILY
+        # kill switch (a separate, pre-existing safety mechanism) would
+        # have long since reset even though the ROLLING 20-trade window
+        # this feature checks still remembers the streak. Compressing all
+        # 20 into one test run would otherwise trip that unrelated daily
+        # limit first and reject the trade before dampening ever gets a
+        # chance to apply — simulating that time has passed since,
+        # matching what a real multi-day cold streak actually looks like.
+        shadow.get_engines()["calibrated_conservative"].state.realized_pnl_today_cents = 0
+
+        no_bids = [(60, 300)]
+        yes_bids = [(30, 300)]
+        shadow.evaluate_and_log("KXRAIN-COLDTEST", make_signal("KXRAIN-COLDTEST"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=yes_bids, no_bids=no_bids)
+
+        with storage.get_conn() as conn:
+            cold = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='calibrated_conservative' AND ticker='KXRAIN-COLDTEST'"
+            ).fetchone()
+            hot = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='calibrated_aggressive' AND ticker='KXRAIN-COLDTEST'"
+            ).fetchone()
+
+        self.assertIsNotNone(cold)
+        self.assertIsNotNone(hot)
+        self.assertLess(cold[0], hot[0])
+
+    def test_dampening_never_fully_halts_a_strategy(self):
+        for i in range(20):
+            tid = storage.log_shadow_trade("calibrated_conservative", f"COLD{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        # Same reasoning as above -- simulate that time has passed since
+        # this streak, so only the rolling-window check (not the daily
+        # kill switch) is in play here.
+        shadow.get_engines()["calibrated_conservative"].state.realized_pnl_today_cents = 0
+
+        shadow.evaluate_and_log("KXRAIN-STILLTRADES", make_signal("KXRAIN-STILLTRADES"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='calibrated_conservative' AND ticker='KXRAIN-STILLTRADES'"
+            ).fetchone()
+        self.assertIsNotNone(row, "a dampened strategy should still trade, just smaller")
+        self.assertGreaterEqual(row[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
