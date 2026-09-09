@@ -97,7 +97,6 @@ STRATEGIES = {
     # fine — it's paper money and isn't trying to win) never trips the
     # kill switch and stops it from doing its one job of just trading.
     "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
-                            "station_filter": ["KAUS", "KLAS", "KMDW", "KHOU", "KDEN"],
                             "min_edge_cents_override": 0, "max_price_override": 99,
                             "max_daily_loss_pct_override": 1.0},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
