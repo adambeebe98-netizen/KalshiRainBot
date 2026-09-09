@@ -233,7 +233,12 @@ def get_engines() -> dict[str, RiskManager]:
         _engines = {}
         for name, cfg in ACTIVE_STRATEGIES.items():
             bankroll = storage.load_last_shadow_bankroll(name, SETTINGS.starting_bankroll_cents)
-            state = RiskState(bankroll_cents=bankroll, day=date.today())
+            # Seeds today's real realized P&L instead of assuming 0 — see
+            # get_todays_realized_pnl_cents()'s docstring for why this
+            # matters for the daily kill switch surviving a restart.
+            realized_today = storage.get_todays_realized_pnl_cents(name)
+            state = RiskState(bankroll_cents=bankroll, day=date.today(),
+                               realized_pnl_today_cents=realized_today)
             _engines[name] = RiskManager(state, _build_preset(cfg))
     return _engines
 
