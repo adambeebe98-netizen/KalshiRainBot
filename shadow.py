@@ -49,6 +49,42 @@ from kalshi_client import market_price_cents
 # what it WOULD do if that upstream filter ever changed.
 CONFIDENCE_SIZE_MULTIPLIER = {"high": 1.0, "medium": 0.5, "low": 0.0}
 
+# Automatic, mechanical performance dampening — deliberately NOT an LLM
+# judgment call (unlike advisor.py's suggestions or retrospective.py's
+# analysis, both of which require a human to read and act on them). This
+# is a pure, deterministic circuit breaker: if a strategy's last
+# COLD_STREAK_LOOKBACK_TRADES settled trades add up to worse than
+# COLD_STREAK_ROI_THRESHOLD_PCT return-on-capital, its position sizing is
+# scaled down by COLD_STREAK_DAMPENING_MULTIPLIER until enough of that
+# cold streak ages out of the rolling window to recover. The asymmetry is
+# what makes this safe to run with zero human review: it can only ever
+# REDUCE size below the tier's normal cap, never increase it above
+# baseline — there's no way for this mechanism, even if it's somehow
+# wrong, to make a strategy MORE aggressive than its configured risk
+# tier already allows. Requires COLD_STREAK_MIN_TRADES of real settled
+# data before it activates at all, same "don't overreact to too little
+# data" philosophy calibration.py and categories.py already use.
+COLD_STREAK_MIN_TRADES = 10
+COLD_STREAK_LOOKBACK_TRADES = 20
+COLD_STREAK_ROI_THRESHOLD_PCT = -15.0
+COLD_STREAK_DAMPENING_MULTIPLIER = 0.5
+
+
+def performance_dampening_multiplier(perf: dict) -> float:
+    """
+    Pure function, deliberately separate from the storage query that
+    produces `perf` (see storage.get_recent_strategy_performance) — keeps
+    the actual DECISION logic testable without a database, and makes it
+    easy to verify in isolation that this can only ever return a value
+    <= 1.0 (see the module-level docstring above for why that asymmetry
+    is what makes automating this safe).
+    """
+    if perf["trades"] < COLD_STREAK_MIN_TRADES:
+        return 1.0
+    if perf["roi_pct"] is not None and perf["roi_pct"] <= COLD_STREAK_ROI_THRESHOLD_PCT:
+        return COLD_STREAK_DAMPENING_MULTIPLIER
+    return 1.0
+
 # Bracket-arbitrage tuning — deliberately NOT in TUNABLE_PARAMS/advisor-editable,
 # same reasoning as the calibrated model itself: this is math (capital
 # efficiency + early-exit salvage), not a heuristic threshold to sweep.
@@ -440,6 +476,18 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             contracts = int(contracts * mult)
             if contracts < 1:
                 continue
+
+        # Automatic performance dampening — see the module-level docstring
+        # above for the full reasoning. Applied uniformly to every kind,
+        # including arbitrage/bracket_arbitrage: if one of those is
+        # somehow on a real losing streak, that's almost certainly a bug
+        # (a mathematically-sound hedge shouldn't lose consistently), and
+        # trading smaller while it gets investigated is a reasonable
+        # default, not a wrong one.
+        perf = storage.get_recent_strategy_performance(name, lookback=COLD_STREAK_LOOKBACK_TRADES)
+        dampening = performance_dampening_multiplier(perf)
+        if dampening < 1.0:
+            contracts = max(1, int(contracts * dampening))
 
         # Real depth-aware sizing/pricing when the caller fetched the order
         # book this cycle (see the docstring above and depth_sizing.py) —
