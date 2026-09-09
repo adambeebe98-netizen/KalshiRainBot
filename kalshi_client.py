@@ -104,11 +104,20 @@ class KalshiClient:
 
     def _request(self, method: str, path: str, params: dict | None = None,
                  json_body: dict | None = None) -> dict:
-        # The path used in the signature must match exactly what's sent on the wire,
-        # including the /trade-api/v2 prefix — adjust here if Kalshi changes this.
+        # The signature must cover the FULL path Kalshi actually receives —
+        # including /trade-api/v2 — regardless of how KALSHI_BASE_URL is
+        # configured. But the request itself must be sent to `path` alone:
+        # KALSHI_BASE_URL already ends in /trade-api/v2 (see config.py's
+        # default), so sending to full_path here would double it up into
+        # /trade-api/v2/trade-api/v2/... and 404. (This exact regression
+        # happened TWICE tonight — once from a throwaway demo-test config
+        # that did not include /trade-api/v2 in ITS base URL, and again
+        # from editing a stale local copy of this file that predated the
+        # first fix. Both times: revert to path, not full_path, for the
+        # actual request.)
         full_path = path if path.startswith("/trade-api") else f"/trade-api/v2{path}"
         headers = self._headers(method, full_path)
-        resp = self._client.request(method, full_path, params=params, json=json_body, headers=headers)
+        resp = self._client.request(method, path, params=params, json=json_body, headers=headers)
         if resp.status_code >= 400:
             raise RuntimeError(f"Kalshi API error {resp.status_code} on {method} {path}: {resp.text}")
         return resp.json()
