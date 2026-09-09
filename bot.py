@@ -256,13 +256,29 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                       f"no model for measure={rules.measure!r}", mode)
                 continue
 
+            # Fetched ONCE here and shared by both the shadow strategies
+            # below (all 16+ of them) and the main bot's own real-order
+            # sizing further down — same order book, no reason to re-fetch
+            # it per-consumer. Fails open (None, None) rather than skipping
+            # the market entirely: every shadow strategy already falls back
+            # to the flat top-of-book price/count when book data isn't
+            # available (see shadow.evaluate_and_log's docstring), so a
+            # transient orderbook-fetch failure degrades sizing accuracy
+            # for this one cycle rather than losing the market completely.
+            try:
+                yes_bids, no_bids = kalshi.get_orderbook_levels(ticker)
+            except Exception as e:
+                log.warning(f"Orderbook fetch failed for {ticker}, shadow/sizing falls back to flat pricing: {e}")
+                yes_bids, no_bids = None, None
+
             # Every shadow strategy (see shadow.py / strategies_lib.py) gets a
             # look at this same market, independent of what the ACTIVE bot
             # decides below — always paper, never a real order.
             shadow.evaluate_and_log(ticker, signal, yes_price, no_ask, rules.station_code, rules.measure,
                                      confidence=rules.confidence,
                                      current_forecast_temp_f=current_forecast_temp_f,
-                                     previous_forecast_temp_f=previous_forecast_temp_f)
+                                     previous_forecast_temp_f=previous_forecast_temp_f,
+                                     yes_bids=yes_bids, no_bids=no_bids)
 
             approved, reason = risk.approve_trade(
                 price_cents=(yes_price if signal.side == "yes" else 100 - yes_price),
@@ -285,17 +301,12 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             # real-fill-price expected edge still clears the minimum —
             # rather than assuming the quoted price holds at any size, which
             # would overstate edge (and, during paper trading, overstate how
-            # good the strategy actually is). Scoped to the main bot's trade
-            # path only for now, not the 7 shadow strategies — see shadow.py
-            # if extending this there later; that's a real extra API call
-            # per candidate trade, multiplied by every shadow strategy, so
-            # it wasn't added there without deciding that tradeoff on purpose.
-            try:
-                yes_bids, no_bids = kalshi.get_orderbook_levels(ticker)
-            except Exception as e:
-                log.warning(f"Orderbook fetch failed for {ticker}, skipping: {e}")
+            # good the strategy actually is). yes_bids/no_bids were already
+            # fetched once, earlier, and shared with every shadow strategy
+            # too (see above) — reused here rather than fetched again.
+            if yes_bids is None or no_bids is None:
                 storage.log_decision(ticker, signal.side, yes_price, signal.model_probability,
-                                      signal.edge_cents, "skipped", f"orderbook fetch failed: {e}", mode)
+                                      signal.edge_cents, "skipped", "orderbook fetch failed earlier this cycle", mode)
                 continue
 
             # Buying YES is matched against resting NO bids (inverted to
