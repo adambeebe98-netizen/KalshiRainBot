@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
     station_code TEXT,
     measure TEXT,
     exit_target_cents INTEGER,   -- swing strategy only: sell early once this price is reached
+    rationale TEXT,              -- the human-readable reasoning generated at decision time
+                                  -- (forecast/observation data used, calibration note, etc.) —
+                                  -- without this, a post-mortem analysis of WHY a trade lost only
+                                  -- has raw numbers to work with, losing the actual reasoning
+                                  -- context that makes root-cause analysis useful. Only populated
+                                  -- for trades logged after this field was added; older rows are
+                                  -- NULL, not an error.
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -168,6 +175,7 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN exit_target_cents INTEGER",
         "ALTER TABLE shadow_trades ADD COLUMN precomputed_payout_cents INTEGER",
         "ALTER TABLE shadow_trades ADD COLUMN sample_member_ticker TEXT",
+        "ALTER TABLE shadow_trades ADD COLUMN rationale TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -297,15 +305,16 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       model_probability: float | None = None, station_code: str | None = None,
                       measure: str | None = None, exit_target_cents: int | None = None,
                       precomputed_payout_cents: int | None = None,
-                      sample_member_ticker: str | None = None) -> int:
+                      sample_member_ticker: str | None = None,
+                      rationale: str | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
             "model_probability, station_code, measure, exit_target_cents, "
-            "precomputed_payout_cents, sample_member_ticker) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "precomputed_payout_cents, sample_member_ticker, rationale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
-             precomputed_payout_cents, sample_member_ticker),
+             precomputed_payout_cents, sample_member_ticker, rationale),
         )
         return cur.lastrowid
 
