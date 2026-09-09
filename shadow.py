@@ -202,6 +202,7 @@ def _build_preset(cfg: dict) -> RiskPreset:
         min_contract_price_cents=SETTINGS.min_contract_price_cents,
         max_contract_price_cents=cfg.get("max_price_override", SETTINGS.max_contract_price_cents),
         max_open_positions=SETTINGS.max_open_positions,
+        max_contracts_per_trade=cfg.get("max_contracts_override", p["max_contracts_per_trade"]),
     )
 
 
