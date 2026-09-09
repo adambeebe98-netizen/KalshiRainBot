@@ -38,6 +38,7 @@ import strategies_lib as lib
 import categories
 import fees
 import storage
+import calibration
 import depth_sizing as lib_depth
 from kalshi_client import market_price_cents
 
@@ -783,7 +784,18 @@ def check_swing_exits() -> int:
 def settle(ticker_results: dict[str, tuple[bool, Optional[str]]]) -> int:
     """ticker_results: {ticker: (is_settled, 'yes'|'no'|None)} — reuses the
     same settlement lookups the real settlement.py already fetched this
-    cycle, so this never makes its own extra API calls."""
+    cycle, so this never makes its own extra API calls.
+
+    Also feeds calibration.py from every settled trade that carries a real
+    model_probability — not just the main bot's own (rare, single-strategy)
+    real trades, the way settlement.py alone does. The calibrated shadow
+    strategies (calibrated_*, temp_calibrated_*, rain_calibrated_*) already
+    store the exact same model_probability_yes the main bot uses, at far
+    higher volume (dozens of settled trades per strategy vs. a trickle from
+    one active strategy) — record_outcome() itself already no-ops cleanly
+    on trades without a real station_code/measure/model_probability
+    (arbitrage's "both" side, always_trade, favorites), so this is safe to
+    call unconditionally rather than needing to filter by kind here."""
     engines = get_engines()
     open_trades = storage.get_open_shadow_trades()
     settled_count = 0
@@ -813,6 +825,17 @@ def settle(ticker_results: dict[str, tuple[bool, Optional[str]]]) -> int:
         rm = engines.get(trade["strategy"])
         if rm:
             rm.record_settlement(pnl_cents)
+
+        # Calibration tracks the YES-event probability consistently,
+        # regardless of which side was actually traded — same convention
+        # settlement.py already uses for the main bot's real trades.
+        calibration.record_outcome(
+            station_code=trade.get("station_code"),
+            measure=trade.get("measure"),
+            predicted_probability=trade.get("model_probability"),
+            actual_outcome=(result == "yes"),
+        )
+
         settled_count += 1
 
     return settled_count
