@@ -254,8 +254,21 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 no_ask = 100 - m_yes_bid
 
             # 1. Get and cache structured settlement rules for this market.
-            rules_text = kalshi.get_market_rules_text(ticker)
-            rules = extractor.extract(ticker, rules_text)
+            # Wrapped defensively: an uncaught exception here (a rules_text
+            # fetch failure, or anything unexpected from extraction) used to
+            # propagate straight up and break the ENTIRE remaining loop for
+            # every other market in this series this cycle — not just this
+            # one ticker. rules_extractor.extract() already guards its own
+            # internal parsing failures; this catches anything else,
+            # including a network failure in get_market_rules_text itself.
+            try:
+                rules_text = kalshi.get_market_rules_text(ticker)
+                rules = extractor.extract(ticker, rules_text)
+            except Exception as e:
+                log.warning(f"Rules extraction failed for {ticker}, skipping this market this cycle: {e}")
+                storage.log_decision(ticker, "n/a", yes_price, 0.5, 0, "skipped",
+                                      f"rules extraction failed: {e}", mode)
+                continue
 
             if rules.confidence == "low":
                 storage.log_decision(ticker, "n/a", yes_price, 0.5, 0, "skipped",
