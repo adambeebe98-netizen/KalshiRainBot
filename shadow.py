@@ -282,14 +282,44 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         elif kind == "arbitrage":
             candidate = lib.arbitrage_candidate(yes_ask, no_ask)
             if candidate:
-                # Arbitrage buys ONE unit of each side — always exactly 1 contract
-                # pair, since the "edge" doesn't scale the same way with size as
-                # a probability-based bet does. Log directly, skip normal sizing.
+                # Quick cheap gate first (kill switch, max open positions,
+                # price band) on the naive top-of-book quote, same
+                # two-stage pattern as every other kind — the REAL sizing
+                # decision happens below via find_max_arbitrage_size, which
+                # does its own, more accurate profitability check against
+                # real depth, so this first check existing just avoids
+                # doing a depth fetch/walk for something that was never
+                # going to pass basic gating anyway.
                 approved, reason = rm.approve_trade(candidate.price_cents, candidate.edge_cents)
                 if approved:
-                    storage.log_shadow_trade(name, ticker, "both", 1, candidate.price_cents,
+                    if yes_bids is not None and no_bids is not None:
+                        yes_ask_levels = lib_depth.implied_ask_levels(no_bids)
+                        no_ask_levels = lib_depth.implied_ask_levels(yes_bids)
+                        # Not a probabilistic bet — see max_contracts_for_trade's
+                        # apply_contract_cap docstring in risk_manager.py for
+                        # why arbitrage sizing skips the bet-specific
+                        # contract/slippage ceilings and uses only the
+                        # dollar-based bankroll cap plus real depth-walked
+                        # profitability.
+                        dollar_cap = rm.max_contracts_for_trade(candidate.price_cents, apply_contract_cap=False)
+                        fill = lib_depth.find_max_arbitrage_size(
+                            yes_ask_levels, no_ask_levels, fees.taker_fee_cents,
+                            min_net_edge_cents=rm.preset.min_edge_cents,
+                        )
+                        if fill is None or fill.contracts_fillable < 1:
+                            continue
+                        pairs = min(fill.contracts_fillable, dollar_cap)
+                        if pairs < 1:
+                            continue
+                        realized_price = round(fill.avg_price_cents)
+                    else:
+                        # No book data this cycle -- fall back to the
+                        # original single-pair behavior exactly as before.
+                        pairs, realized_price = 1, candidate.price_cents
+
+                    storage.log_shadow_trade(name, ticker, "both", pairs, realized_price,
                                               model_probability=None, station_code=station_code, measure=measure)
-                    rm.record_fill(cost_cents=candidate.price_cents)
+                    rm.record_fill(cost_cents=pairs * realized_price)
             continue
 
         elif kind == "favorites":
@@ -484,8 +514,13 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
         return
 
     # How many SETS can the bankroll afford, per the usual sizing rule —
-    # "price" of one set is total_cost, same arithmetic as any other strategy.
-    sets = rm.max_contracts_for_trade(total_cost)
+    # "price" of one set is total_cost, same arithmetic as any other
+    # strategy. apply_contract_cap=False: this isn't a probabilistic bet
+    # (see max_contracts_for_trade's docstring in risk_manager.py) — sizing
+    # here already comes from real per-leg mispricing, not a model
+    # estimate, so the bet-specific fixed contract ceiling doesn't belong
+    # on it, only the dollar-based bankroll cap.
+    sets = rm.max_contracts_for_trade(total_cost, apply_contract_cap=False)
     if sets < 1:
         return
 
