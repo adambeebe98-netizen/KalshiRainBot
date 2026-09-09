@@ -318,6 +318,19 @@ DASHBOARD_PAGE = """
 </div>
 
 <div class="card">
+  <h2>Loss analysis <span style="font-size:12px;color:#8b949e;">(Claude's periodic qualitative review of settled trades — read-only, nothing here changes any behavior automatically)</span></h2>
+  {% if latest_retrospective %}
+  <p style="color:#8b949e;font-size:12px;">
+    Reviewed {{ latest_retrospective.trades_analyzed }} trades ({{ latest_retrospective.wins_analyzed }} won,
+    {{ latest_retrospective.losses_analyzed }} lost) — {{ latest_retrospective.ago }} ago.
+  </p>
+  <div style="white-space:pre-wrap;line-height:1.5;">{{ latest_retrospective.analysis_text }}</div>
+  {% else %}
+  <p style="color:#8b949e;">No retrospective yet — needs at least 20 settled trades in the review window.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>Configuration</h2>
   <form method="post" action="/setup">
     <label>Kalshi API Key ID {% if has_kalshi_key %}(currently set — leave blank to keep it){% endif %}</label>
@@ -472,6 +485,7 @@ def dashboard():
     category_pnl_history = {}
     open_markets = []
     decision_summary = {"counts": {"traded": 0, "skipped": 0, "total": 0}, "skip_reasons": {}}
+    latest_retrospective = None
     try:
         shadow_summary = storage.get_shadow_summary()
         category_summary = storage.get_shadow_summary_by_category()
@@ -486,6 +500,12 @@ def dashboard():
             age_s = now - m["ts"]
             last_seen = f"{age_s}s ago" if age_s < 120 else f"{age_s // 60}m ago"
             open_markets.append({**m, "last_seen": last_seen})
+        recent_retros = storage.get_recent_retrospectives(limit=1)
+        if recent_retros:
+            r = recent_retros[0]
+            age_s = now - r["ts"]
+            ago = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
+            latest_retrospective = {**r, "ago": ago}
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -505,6 +525,7 @@ def dashboard():
         open_markets=open_markets,
         decision_summary=decision_summary,
         suggestions=storage.get_suggestions(status="pending"),
+        latest_retrospective=latest_retrospective,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
