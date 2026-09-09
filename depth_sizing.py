@@ -65,13 +65,52 @@ def estimate_fill(ask_levels: list[tuple[int, int]], target_contracts: int) -> F
     )
 
 
+def max_contracts_within_slippage(ask_levels: list[tuple[int, int]], max_slippage_cents: int) -> int:
+    """
+    How many contracts can be bought while keeping the average fill price
+    within max_slippage_cents of the best/cheapest quote — for strategies
+    that don't carry a real probability estimate to run
+    find_max_profitable_size's profitability search against (favorites,
+    always_trade), but should still respect the same price-impact
+    discipline as the profit-aware strategies do, just without a
+    profitability gate on top of it.
+    """
+    if not ask_levels:
+        return 0
+    best_price = ask_levels[0][0]
+    total_cost = 0
+    filled = 0
+    for price_cents, level_count in ask_levels:
+        candidate_cost = total_cost + price_cents * level_count
+        candidate_filled = filled + level_count
+        candidate_avg = candidate_cost / candidate_filled
+        if candidate_avg - best_price > max_slippage_cents:
+            break  # stop at the level BEFORE this one pushed the average out of tolerance
+        total_cost, filled = candidate_cost, candidate_filled
+    return filled
+
+
 def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_probability: float,
-                              max_contracts_cap: int, min_net_edge_cents: int) -> FillEstimate | None:
+                              max_contracts_cap: int, min_net_edge_cents: int,
+                              max_slippage_cents: int | None = None) -> FillEstimate | None:
     """
     The actual "throw $1 vs throw $20" search: tries increasing sizes,
     stops at the largest one whose NET (post-fee, real-fill-price) expected
     edge is still positive above min_net_edge_cents. Returns None if not
     even the smallest step clears the bar.
+
+    max_slippage_cents (optional): a SEPARATE stopping condition from the
+    profitability check above — caps how far the average fill price is
+    allowed to drift from the best/cheapest quoted price (ask_levels[0]),
+    regardless of whether a bigger size would still be nominally
+    profitable. This is the more precise version of "don't chase a big
+    position and hurt your own fill" — a fixed contract-count cap doesn't
+    know whether it's walking through a deep, evenly-priced book (where
+    slippage barely moves) or a thin one (where it moves fast), but
+    slippage measures the actual thing being protected against directly.
+    An aggressive risk tier passing a larger value here is deliberately
+    tolerating more price impact in exchange for size, same as it already
+    tolerates smaller min_net_edge_cents.
 
     fee_fn: a callable(contracts, price_cents) -> fee_cents, e.g.
     fees.taker_fee_cents, passed in rather than imported directly so this
@@ -83,6 +122,7 @@ def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_pr
     a cleverer search would be.
     """
     best: FillEstimate | None = None
+    best_price_cents = ask_levels[0][0] if ask_levels else None
     # max_contracts_cap comes from the bankroll/position-pct math and knows
     # nothing about how much is actually sitting in the book — clamping it
     # to the real total depth first means the step below is always sized to
@@ -111,6 +151,11 @@ def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_pr
         fill = estimate_fill(ask_levels, size)
         if fill.contracts_fillable < size:
             break  # book exhausted before reaching this size — no point trying bigger
+
+        if max_slippage_cents is not None and best_price_cents is not None:
+            if fill.avg_price_cents - best_price_cents > max_slippage_cents:
+                break  # this size already drifts further from the best quote
+                        # than this tier tolerates — bigger only drifts further
 
         expected_value_cents = model_probability * 100 - fill.avg_price_cents
         fee_cents = fee_fn(fill.contracts_fillable, round(fill.avg_price_cents))
