@@ -147,3 +147,23 @@ def kalshi_station_to_nws_id(kalshi_station_code: str | None) -> str | None:
     if kalshi_station_code and kalshi_station_code.startswith("CLI") and len(kalshi_station_code) == 6:
         return "K" + kalshi_station_code[3:]
     return kalshi_station_code
+
+
+def looks_like_us_station(station: str | None) -> bool:
+    """
+    A plausible US ICAO/airport code — 4 letters, K-prefixed (the standard
+    for the continental US). Every international city seen in Kalshi's
+    discovered temperature series (RJTT/Tokyo, RKSI/Seoul, LFPG/Paris,
+    LSGG/Geneva, EDDF/Frankfurt, EGLL/London, EHAM/Amsterdam,
+    EBBR/Brussels, MMMX/Mexico City, CYYZ/Toronto, VABB/Mumbai,
+    VHHH/Hong Kong, WSSS/Singapore, YSSY/Sydney, ZBAA/Beijing, ZSPD/Shanghai)
+    uses a non-K prefix. weather.gov is a US-only NWS system, so a
+    non-US-shaped code would 404 every single cycle with zero chance of
+    ever succeeding — this lets the caller skip that call entirely rather
+    than pay the cost (and add log noise) for something that structurally
+    can't be fixed from this side. Deliberately permissive rather than an
+    exhaustive allowlist: any 4-letter K-code is treated as "worth trying,"
+    even ones not yet in STATION_REFERENCE, since a plausible US station
+    still might resolve.
+    """
+    return bool(station) and station.startswith("K") and len(station) == 4
