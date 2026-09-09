@@ -163,5 +163,40 @@ class TestArbitrageNotABetExemption(unittest.TestCase):
         self.assertLessEqual(row[0], 25, "a directional bet MUST still respect the fixed contract cap")
 
 
+class TestRationaleCapture(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_calibrated_strategy_captures_the_real_signal_rationale(self):
+        """Without this, a post-mortem analysis of a losing trade only has
+        raw numbers to work with -- the actual reasoning generated at
+        decision time (forecast data used, calibration note) is what
+        makes root-cause analysis useful."""
+        sig = make_signal("KXRAIN-RAT1")
+        sig.rationale = "forecast max POP over next periods: 65%; calibration: n=25, bias=+0.03"
+        shadow.evaluate_and_log("KXRAIN-RAT1", sig, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='KXRAIN-RAT1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("forecast max POP", row[0])
+
+    def test_always_trade_captures_its_own_smoke_test_rationale(self):
+        shadow.evaluate_and_log("KXRAIN-RAT2", None, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='rain_always_trade' AND ticker='KXRAIN-RAT2'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("pipeline smoke test", row[0])
+
+
 if __name__ == "__main__":
     unittest.main()
