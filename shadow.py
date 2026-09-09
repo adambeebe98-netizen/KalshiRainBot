@@ -96,6 +96,7 @@ STRATEGIES = {
     # fine — it's paper money and isn't trying to win) never trips the
     # kill switch and stops it from doing its one job of just trading.
     "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
+                            "station_filter": "KHOU",
                             "min_edge_cents_override": 0, "max_price_override": 99,
                             "max_daily_loss_pct_override": 1.0},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
@@ -256,6 +257,15 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         # strategy ever uses.
         cat_filter = cfg.get("category_filter")
         if cat_filter and categories.category_for(measure) != cat_filter:
+            continue
+
+        # Same idea, one level narrower: a strategy can also be pinned to
+        # ONE specific station (e.g. rain_always_trade -> KHOU/Houston) —
+        # useful for cutting every other source of variation (which city,
+        # which day, discovery noise) down to a single, well-known market
+        # while diagnosing whether the pipeline itself fires at all.
+        station_filter = cfg.get("station_filter")
+        if station_filter and station_code != station_filter:
             continue
 
         if kind in ("calibrated", "calibrated_confidence_weighted"):
