@@ -37,7 +37,7 @@ import time
 from datetime import date, datetime, timezone
 
 from config import SETTINGS
-from kalshi_client import KalshiClient
+from kalshi_client import KalshiClient, market_price_cents
 from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
 from strategy import evaluate_market, evaluate_temperature_market, pick_relevant_forecast_temp_f
@@ -213,10 +213,20 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             # history yet is still genuinely open, and should still show up
             # as open, even though there's nothing to compute a signal
             # against yet.
-            storage.log_price_snapshot(ticker, market.get("yes_ask"), market.get("yes_bid"))
+            # market_price_cents() reads the real "<field>_dollars" keys
+            # Kalshi's list endpoint actually returns (see its docstring in
+            # kalshi_client.py) — a raw market.get("yes_ask") always
+            # silently returned None here, since that key never existed.
+            m_yes_ask = market_price_cents(market, "yes_ask")
+            m_yes_bid = market_price_cents(market, "yes_bid")
+            m_no_ask = market_price_cents(market, "no_ask")
+            m_no_bid = market_price_cents(market, "no_bid")
+            m_last_price = market_price_cents(market, "last_price")
 
-            yes_price = market.get("yes_ask") or market.get("last_price")
-            if yes_price is None and market.get("no_bid") is not None:
+            storage.log_price_snapshot(ticker, m_yes_ask, m_yes_bid)
+
+            yes_price = m_yes_ask or m_last_price
+            if yes_price is None and m_no_bid is not None:
                 # Symmetric case to the no_ask-from-yes_bid inversion a few
                 # lines below: a resting NO bid at price P is the exact
                 # same underlying liquidity as an implied YES ask at
@@ -227,16 +237,16 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 # only resting NO-side liquidity looked exactly like a
                 # market with no liquidity at all, and got silently skipped
                 # as "no tradeable quote yet."
-                yes_price = 100 - market["no_bid"]
+                yes_price = 100 - m_no_bid
             if not yes_price:
                 storage.log_decision(ticker, "n/a", 0, 0.5, 0, "skipped",
                                       "no live ask quote or trade history yet — nothing to price a signal against",
                                       mode)
                 continue
 
-            no_ask = market.get("no_ask")
-            if no_ask is None and market.get("yes_bid") is not None:
-                no_ask = 100 - market["yes_bid"]
+            no_ask = m_no_ask
+            if no_ask is None and m_yes_bid is not None:
+                no_ask = 100 - m_yes_bid
 
             # 1. Get and cache structured settlement rules for this market.
             rules_text = kalshi.get_market_rules_text(ticker)
