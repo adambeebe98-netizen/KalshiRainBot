@@ -619,8 +619,16 @@ def get_current_open_markets(window_seconds: int = 900) -> list[dict]:
         conn.row_factory = sqlite3.Row
         cutoff = int(time.time()) - window_seconds
         rows = conn.execute(
+            # MAX(id), not MAX(ts): two snapshots logged within the same
+            # second share an identical Unix timestamp (real, observed —
+            # not just a theoretical edge case), which made ts-based
+            # tie-breaking non-deterministic and could return more than
+            # one row for the same ticker. id is always unique and
+            # strictly increases with insertion order, so this guarantees
+            # exactly one row per ticker — the most recently INSERTED one,
+            # which matches "most recent" even when ts ties.
             "SELECT p1.ticker, p1.yes_ask, p1.yes_bid, p1.ts FROM price_history p1 "
-            "WHERE p1.ts = (SELECT MAX(p2.ts) FROM price_history p2 WHERE p2.ticker = p1.ticker) "
+            "WHERE p1.id = (SELECT MAX(p2.id) FROM price_history p2 WHERE p2.ticker = p1.ticker) "
             "AND p1.ts >= ? ORDER BY p1.ts DESC",
             (cutoff,),
         ).fetchall()
