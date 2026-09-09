@@ -170,35 +170,39 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
         # brackets for one city at once, not one market at a time like every
         # other strategy. This runs once per event per cycle, independent of
         # the per-market loop below.
-        by_event: dict[str, list[dict]] = {}
-        for market in found:
-            event_ticker = market.get("event_ticker")
-            if event_ticker:
-                by_event.setdefault(event_ticker, []).append(market)
-        for event_ticker, event_markets in by_event.items():
-            if len(event_markets) >= 2:  # a "bracket set" needs at least 2 mutually-exclusive options
-                try:
-                    # One orderbook fetch per leg — a real, additional API
-                    # cost proportional to the set's size, deliberately
-                    # accepted so bracket sizing can walk each leg's real
-                    # depth (see shadow.evaluate_bracket_set) instead of
-                    # assuming the flat top-of-book price holds at any
-                    # size. Fails open per-leg: a single leg's fetch
-                    # failing just makes that leg's entry (None, None),
-                    # which evaluate_bracket_set treats as "no depth data
-                    # for this set" and falls back to its original flat
-                    # top-of-book behavior for the WHOLE set, rather than
-                    # guessing at partial depth data.
-                    leg_orderbooks: dict[str, tuple] = {}
-                    for m in event_markets:
-                        try:
-                            leg_orderbooks[m["ticker"]] = kalshi.get_orderbook_levels(m["ticker"])
-                        except Exception as e:
-                            log.warning(f"Orderbook fetch failed for bracket leg {m['ticker']}: {e}")
-                            leg_orderbooks[m["ticker"]] = (None, None)
-                    shadow.evaluate_bracket_set(event_ticker, event_markets, leg_orderbooks)
-                except Exception as e:
-                    log.warning(f"Bracket arbitrage evaluation failed for {event_ticker}: {e}")
+        # DISABLED as of 2026-09-09 (see shadow.py's STRATEGIES dict) — the
+        # per-leg orderbook fetch below is a real, non-trivial API cost, no
+        # reason to keep paying it while the strategy itself is a no-op.
+        if "bracket_arbitrage" in shadow.ACTIVE_STRATEGIES:
+            by_event: dict[str, list[dict]] = {}
+            for market in found:
+                event_ticker = market.get("event_ticker")
+                if event_ticker:
+                    by_event.setdefault(event_ticker, []).append(market)
+            for event_ticker, event_markets in by_event.items():
+                if len(event_markets) >= 2:  # a "bracket set" needs at least 2 mutually-exclusive options
+                    try:
+                        # One orderbook fetch per leg — a real, additional API
+                        # cost proportional to the set's size, deliberately
+                        # accepted so bracket sizing can walk each leg's real
+                        # depth (see shadow.evaluate_bracket_set) instead of
+                        # assuming the flat top-of-book price holds at any
+                        # size. Fails open per-leg: a single leg's fetch
+                        # failing just makes that leg's entry (None, None),
+                        # which evaluate_bracket_set treats as "no depth data
+                        # for this set" and falls back to its original flat
+                        # top-of-book behavior for the WHOLE set, rather than
+                        # guessing at partial depth data.
+                        leg_orderbooks: dict[str, tuple] = {}
+                        for m in event_markets:
+                            try:
+                                leg_orderbooks[m["ticker"]] = kalshi.get_orderbook_levels(m["ticker"])
+                            except Exception as e:
+                                log.warning(f"Orderbook fetch failed for bracket leg {m['ticker']}: {e}")
+                                leg_orderbooks[m["ticker"]] = (None, None)
+                        shadow.evaluate_bracket_set(event_ticker, event_markets, leg_orderbooks)
+                    except Exception as e:
+                        log.warning(f"Bracket arbitrage evaluation failed for {event_ticker}: {e}")
 
         for market in found:
             ticker = market["ticker"]
