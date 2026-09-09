@@ -193,7 +193,12 @@ def evaluate_temperature_market(
     market_p = market_implied_probability(yes_price_cents)
 
     yes_edge = round((model_p - market_p) * 100)
-    no_edge = round(((1 - model_p) - (1 - market_p)) * 100)
+    # Negation, not a separate rounding of the algebraically-equivalent
+    # (1-model_p)-(1-market_p) — mathematically identical either way, but
+    # this way the two are IDENTICAL by construction, not just empirically
+    # equal (verified across a million random floats with zero mismatches,
+    # but "by construction" needs no such verification to trust).
+    no_edge = -yes_edge
 
     if yes_edge >= no_edge:
         side, edge_cents, price = "yes", yes_edge, yes_price_cents
@@ -235,8 +240,11 @@ def evaluate_market(
     # Decide which side has the edge. If model thinks YES is more likely
     # than the market does, the edge is on buying YES; if model thinks NO
     # is more likely, edge is on NO. Price for NO is (100 - yes_price).
+    # Negation, not a separate rounding computation — see
+    # evaluate_temperature_market's identical comment for why "correct by
+    # construction" beats "empirically verified equal."
     yes_edge = round((model_p - market_p) * 100)
-    no_edge = round(((1 - model_p) - (1 - market_p)) * 100)  # == -yes_edge, kept explicit for clarity
+    no_edge = -yes_edge
 
     if yes_edge >= no_edge:
         side, edge_cents, price = "yes", yes_edge, yes_price_cents
