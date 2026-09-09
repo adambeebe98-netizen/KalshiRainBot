@@ -90,6 +90,62 @@ def max_contracts_within_slippage(ask_levels: list[tuple[int, int]], max_slippag
     return filled
 
 
+def find_max_arbitrage_size(yes_ask_levels: list[tuple[int, int]], no_ask_levels: list[tuple[int, int]],
+                             fee_fn, min_net_edge_cents: int) -> FillEstimate | None:
+    """
+    Sizing for dutch-book arbitrage: buying one YES and one NO contract on
+    the SAME market together guarantees exactly 100c total payout per pair,
+    regardless of which side actually resolves true — there's no
+    probability estimate involved at all, unlike a directional bet. That's
+    the whole reason this is a SEPARATE function from
+    find_max_profitable_size rather than reusing it with model_probability
+    plugged in: there's no max_slippage_cents concept here on purpose — as
+    long as walking deeper into BOTH books still nets a profit after real
+    fill prices and fees, there's no bet-uncertainty reason to stop early
+    on a fixed price-drift budget. The profitability check itself is the
+    only limit that makes sense.
+
+    Walks BOTH sides together for increasing pair counts (need real depth
+    on the yes-ask side AND the no-ask side to fill each pair), same
+    increasing-search pattern as find_max_profitable_size, stopping at the
+    largest pair count whose combined net profit (100c * pairs, minus both
+    legs' real walked cost, minus both legs' real fees) still clears
+    min_net_edge_cents.
+    """
+    total_depth = min(sum(c for _, c in yes_ask_levels), sum(c for _, c in no_ask_levels))
+    if total_depth < 1:
+        return None
+    step = max(1, total_depth // 20)
+
+    best: FillEstimate | None = None
+    size = step
+    while size <= total_depth:
+        yes_fill = estimate_fill(yes_ask_levels, size)
+        no_fill = estimate_fill(no_ask_levels, size)
+        if yes_fill.contracts_fillable < size or no_fill.contracts_fillable < size:
+            break  # one side ran out of depth before the other -- no point trying bigger
+
+        total_cost = yes_fill.total_cost_cents + no_fill.total_cost_cents
+        gross_payout = 100 * size
+        fee_cents = (fee_fn(size, round(yes_fill.avg_price_cents)) +
+                     fee_fn(size, round(no_fill.avg_price_cents)))
+        net_edge_total = gross_payout - total_cost - fee_cents
+
+        if net_edge_total >= min_net_edge_cents:
+            best = FillEstimate(
+                contracts_fillable=size,
+                total_cost_cents=total_cost,
+                avg_price_cents=total_cost / size,  # combined yes+no avg cost per pair
+                exhausted_book=False,
+            )
+        else:
+            break  # this size no longer profitable -- bigger will only be worse
+
+        size += step
+
+    return best
+
+
 def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_probability: float,
                               max_contracts_cap: int, min_net_edge_cents: int,
                               max_slippage_cents: int | None = None) -> FillEstimate | None:
