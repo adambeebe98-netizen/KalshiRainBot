@@ -203,6 +203,7 @@ def _build_preset(cfg: dict) -> RiskPreset:
         max_contract_price_cents=cfg.get("max_price_override", SETTINGS.max_contract_price_cents),
         max_open_positions=SETTINGS.max_open_positions,
         max_contracts_per_trade=cfg.get("max_contracts_override", p["max_contracts_per_trade"]),
+        max_slippage_cents=cfg.get("max_slippage_override", p["max_slippage_cents"]),
     )
 
 
@@ -382,6 +383,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                 fill = lib_depth.find_max_profitable_size(
                     ask_levels, fees.taker_fee_cents, model_prob,
                     max_contracts_cap=contracts, min_net_edge_cents=rm.preset.min_edge_cents,
+                    max_slippage_cents=rm.preset.max_slippage_cents,
                 )
                 if fill is None:
                     continue
@@ -389,8 +391,10 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                 # favorites/always_trade don't carry a real probability
                 # estimate to check profitability against (see their
                 # branches above) — just cap size to what the book can
-                # actually support, no profit search.
-                fill = lib_depth.estimate_fill(ask_levels, contracts)
+                # actually support AND to this tier's slippage tolerance,
+                # no profit search.
+                slippage_cap = lib_depth.max_contracts_within_slippage(ask_levels, rm.preset.max_slippage_cents)
+                fill = lib_depth.estimate_fill(ask_levels, min(contracts, slippage_cap))
                 if fill.contracts_fillable < 1:
                     continue
             contracts = fill.contracts_fillable
