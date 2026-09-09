@@ -115,6 +115,29 @@ def generate_suggestions() -> int:
             suggested_value = float(item["suggested_value"])
         except (KeyError, TypeError, ValueError):
             continue
+
+        # Hallucination guard: every current TUNABLE_PARAMS entry is a
+        # cents-denominated price (0-100c) — the model was HANDED the real
+        # current_config in the prompt, so its own stated "current_value"
+        # should exactly match what's actually configured. A mismatch is a
+        # strong, cheap signal the model misread the data (or is
+        # confabulating a plausible-sounding number) — discard rather than
+        # show a human a suggestion built on a wrong premise. (If a future
+        # non-price param gets added to TUNABLE_PARAMS, the 0-100 bound
+        # below needs revisiting — it's not a generic assumption, it's
+        # specific to every param that exists today.)
+        real_current = current_config.get(strategy, {}).get(param)
+        if real_current is not None and abs(current_value - float(real_current)) > 0.01:
+            log.warning(f"Advisor's stated current_value ({current_value}) doesn't match the "
+                        f"real configured value ({real_current}) for {strategy}.{param} — "
+                        f"discarding as likely hallucinated: {item}")
+            continue
+
+        if not (0 < suggested_value <= 100):
+            log.warning(f"Advisor suggested an out-of-range value for a cents-denominated "
+                        f"price param, discarding: {item}")
+            continue
+
         rationale = str(item.get("rationale", ""))[:500]
         storage.log_suggestion(strategy, param, current_value, suggested_value, rationale)
         logged += 1
