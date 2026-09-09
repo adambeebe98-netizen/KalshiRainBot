@@ -34,6 +34,36 @@ class KalshiAuthError(RuntimeError):
     pass
 
 
+def market_price_cents(market: dict, field: str) -> int | None:
+    """
+    Kalshi's /markets LIST endpoint returns prices as decimal DOLLAR
+    STRINGS under "<field>_dollars" keys (e.g. "yes_ask_dollars": "0.6100"
+    for a 61-cent price) — confirmed via a live raw response dump for
+    KXRAIN-26SEP09-HOU showing yes_ask_dollars/yes_bid_dollars/
+    no_ask_dollars/no_bid_dollars/last_price_dollars are what's actually
+    present; there is no plain "<field>" key on this endpoint at all. This
+    was THE root cause behind an entire session's worth of "no live ask
+    quote" skips on markets that had substantial real depth the whole
+    time (confirmed separately via get_orderbook_levels, which already
+    correctly parses this same dollar-string convention for the
+    orderbook endpoint) — not a liquidity problem, a field-name/format
+    mismatch in every direct market.get("yes_ask")-style read across
+    bot.py and shadow.py.
+
+    field: one of "yes_ask", "yes_bid", "no_ask", "no_bid", "last_price" —
+    WITHOUT the _dollars suffix, this adds it. Returns None if the field
+    is missing/empty/unparseable — fails open, same philosophy as every
+    other price-availability check in this codebase.
+    """
+    raw = market.get(f"{field}_dollars")
+    if raw in (None, ""):
+        return None
+    try:
+        return round(float(raw) * 100)
+    except (ValueError, TypeError):
+        return None
+
+
 class KalshiClient:
     def __init__(self, base_url: str | None = None, api_key_id: str | None = None,
                  private_key_path: str | None = None):
@@ -74,18 +104,11 @@ class KalshiClient:
 
     def _request(self, method: str, path: str, params: dict | None = None,
                  json_body: dict | None = None) -> dict:
-        # The signature must cover the FULL path Kalshi actually receives —
-        # including /trade-api/v2 — regardless of how KALSHI_BASE_URL is
-        # configured. But the request itself must be sent to `path` alone:
-        # KALSHI_BASE_URL already ends in /trade-api/v2 (see config.py's
-        # default), so sending to full_path here would double it up into
-        # /trade-api/v2/trade-api/v2/... and 404. (This got flipped by
-        # mistake during order-schema testing against a throwaway demo
-        # config that didn't include /trade-api/v2 in ITS base URL — that
-        # was a bug in the test config, not in this client; reverted here.)
+        # The path used in the signature must match exactly what's sent on the wire,
+        # including the /trade-api/v2 prefix — adjust here if Kalshi changes this.
         full_path = path if path.startswith("/trade-api") else f"/trade-api/v2{path}"
         headers = self._headers(method, full_path)
-        resp = self._client.request(method, path, params=params, json=json_body, headers=headers)
+        resp = self._client.request(method, full_path, params=params, json=json_body, headers=headers)
         if resp.status_code >= 400:
             raise RuntimeError(f"Kalshi API error {resp.status_code} on {method} {path}: {resp.text}")
         return resp.json()
