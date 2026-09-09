@@ -113,15 +113,26 @@ class RulesExtractor:
         raw = "".join(block.text for block in response.content if hasattr(block, "text"))
         try:
             parsed = json.loads(raw.strip().strip("`").removeprefix("json").strip())
-        except (json.JSONDecodeError, ValueError):
-            parsed = {
-                "station_code": None, "settlement_source": "unclear", "measure": "other",
-                "threshold_description": "extraction failed — parse manually",
-                "threshold_low_f": None, "threshold_high_f": None,
-                "trace_counts_as_zero": None, "fallback_rule": None, "confidence": "low",
-            }
+            # Constructing MarketRules is INSIDE this try too, not just the
+            # JSON parsing — a syntactically-valid JSON object with an
+            # unexpected or missing field shape (an extra key the model
+            # added, a typo'd field name) raises TypeError from the
+            # dataclass constructor, not JSONDecodeError. That used to
+            # propagate straight up through extract() uncaught, which
+            # would break the ENTIRE per-market loop for every remaining
+            # market in that series this cycle — not just the one bad
+            # response — since bot.py's call site has no try/except of its
+            # own around this step either (see bot.py for its own added
+            # guard against exactly this).
+            result = MarketRules(ticker=ticker, **parsed)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            result = MarketRules(
+                ticker=ticker, station_code=None, settlement_source="unclear", measure="other",
+                threshold_description="extraction failed — parse manually",
+                threshold_low_f=None, threshold_high_f=None,
+                trace_counts_as_zero=None, fallback_rule=None, confidence="low",
+            )
 
-        result = MarketRules(ticker=ticker, **parsed)
         self._cache[ticker] = {"_schema_version": CACHE_SCHEMA_VERSION, **asdict(result)}
         self._save_cache()
         return result
