@@ -523,7 +523,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         exit_target = (realized_price + cfg["exit_offset"]) if kind == "swing" else None
         storage.log_shadow_trade(name, ticker, candidate.side, contracts, realized_price,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
-                                  exit_target_cents=exit_target, rationale=candidate.rationale)
+                                  exit_target_cents=exit_target, rationale=candidate.rationale,
+                                  confidence=confidence)
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
