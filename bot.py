@@ -34,7 +34,7 @@ import argparse
 import logging
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from config import SETTINGS
 from kalshi_client import KalshiClient
@@ -59,6 +59,37 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("kalshi_weather_bot")
+
+# Rain resolves same-day — "will it rain" more than a day or so out is pure
+# forecast uncertainty with no real observation grounding yet, unlike
+# temperature bracket-arbitrage (which cares about mispricing across a set,
+# not forecast accuracy, so a longer horizon is fine there — see
+# shadow.evaluate_bracket_set). 30h rather than a strict 24h gives a buffer
+# for markets that close late in the evening rather than at midnight.
+RAIN_MAX_HORIZON_HOURS = 30
+
+
+def is_far_future_rain(ticker: str, close_time_str: str | None) -> bool:
+    """
+    Cheap, ticker-name-based heuristic ("RAIN" in the ticker) rather than
+    the authoritative rules_extractor measure classification — deliberately
+    so this check can run BEFORE any per-market API calls or LLM-based
+    classification, on every scanned market, every cycle. In practice every
+    real precipitation series observed so far (KXRAIN, KXRAINNYCM,
+    KXRAINSEAM, KXRAINHOU, KXRAINMIA, KXRAINSFOM, ...) is consistently
+    prefixed this way. Fails OPEN (returns False) on anything that can't be
+    parsed — a missing/malformed close_time should never cause a real,
+    tradeable rain market to silently disappear; the cost of occasionally
+    showing one extra far-future market is much lower than hiding a real one.
+    """
+    if "RAIN" not in ticker.upper() or not close_time_str:
+        return False
+    try:
+        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        hours_until_close = (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
+        return hours_until_close > RAIN_MAX_HORIZON_HOURS
+    except (ValueError, TypeError):
+        return False
 
 
 def confirm_live_trading() -> bool:
@@ -140,6 +171,13 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
 
         for market in found:
             ticker = market["ticker"]
+
+            if is_far_future_rain(ticker, market.get("close_time")):
+                storage.log_decision(ticker, "n/a", 0, 0.5, 0, "skipped",
+                                      f"rain market more than {RAIN_MAX_HORIZON_HOURS}h out — "
+                                      "rain signals are same-day/real-time only, unlike temperature "
+                                      "bracket arbitrage which doesn't depend on forecast accuracy", mode)
+                continue
 
             # Log a price point for EVERY scanned market, regardless of
             # whether it currently has a tradeable price — this is what
