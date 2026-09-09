@@ -155,6 +155,23 @@ CREATE TABLE IF NOT EXISTS suggestions (
     status TEXT NOT NULL DEFAULT 'pending'  -- 'pending' | 'applied' | 'dismissed'
 );
 
+-- Claude's periodic qualitative review of WHY trades are winning/losing —
+-- see retrospective.py. Deliberately PROSE ONLY, no structured
+-- strategy/param/value fields the way `suggestions` has: this is
+-- diagnostic reading material for a human, not something any code path
+-- could ever apply automatically even by mistake. That's a stronger
+-- safety property than advisor.py's suggestions table has, on purpose —
+-- open-ended pattern-finding across many trades is a much easier place
+-- for a model to be confidently wrong than "is this one number too high."
+CREATE TABLE IF NOT EXISTS retrospectives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    analysis_text TEXT NOT NULL,
+    trades_analyzed INTEGER NOT NULL,
+    wins_analyzed INTEGER NOT NULL,
+    losses_analyzed INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -387,6 +404,57 @@ def get_todays_realized_pnl_cents_main() -> int:
             "AND settled_ts IS NOT NULL AND date(settled_ts, 'unixepoch') = date('now')"
         ).fetchone()
         return row[0] or 0
+
+
+def get_trades_for_retrospective(hours: int = 168, limit: int = 250) -> list[dict]:
+    """
+    Recent SETTLED shadow trades (both wins AND losses — a balanced sample,
+    not just failures, so the model has contrast to reason from rather than
+    only ever seeing one side of the picture) with their full context:
+    strategy, market, side/price/count, real pnl, the model's stated
+    probability at decision time, and — critically — the rationale text
+    logged then (see shadow.py's log_shadow_trade calls). Trades from
+    before rationale existed have NULL there; still included, just with
+    less context for the model to work with on those specific rows.
+
+    bracket_arbitrage is deliberately included despite being disabled for
+    live trading — its own broken pattern (0% win rate) is exactly the
+    kind of thing this kind of review should be able to surface and name,
+    not hide from the model doing the reviewing.
+    """
+    cutoff = int(time.time()) - hours * 3600
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT strategy, ticker, side, count, price_cents, status, pnl_cents, "
+            "model_probability, station_code, measure, rationale, settled_ts "
+            "FROM shadow_trades WHERE status IN ('won','lost','sold') AND settled_ts >= ? "
+            "ORDER BY settled_ts DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def log_retrospective(analysis_text: str, trades_analyzed: int, wins_analyzed: int,
+                       losses_analyzed: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO retrospectives (ts, analysis_text, trades_analyzed, wins_analyzed, losses_analyzed) "
+            "VALUES (?,?,?,?,?)",
+            (int(time.time()), analysis_text, trades_analyzed, wins_analyzed, losses_analyzed),
+        )
+        return cur.lastrowid
+
+
+def get_recent_retrospectives(limit: int = 5) -> list[dict]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT ts, analysis_text, trades_analyzed, wins_analyzed, losses_analyzed "
+            "FROM retrospectives ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def snapshot_shadow_bankroll(strategy: str, bankroll_cents: int) -> None:
