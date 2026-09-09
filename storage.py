@@ -408,6 +408,53 @@ def get_shadow_bankroll_history(strategy: str, limit: int = 300) -> list[tuple[i
         return list(reversed(rows))
 
 
+def _mark_open_positions_to_market(conn, strategy: str) -> tuple[int, int]:
+    """
+    Current mark-to-market value of every OPEN position for this strategy,
+    using the same convention check_swing_exits()/check_bracket_arbitrage_offload()
+    already use to value a held position: a YES holding is worth its
+    current yes_bid (what you could sell it for right now), a NO holding
+    is worth (100 - current yes_ask). A 'both' (2-leg arbitrage) position
+    is a locked-in 100c/contract regardless of price movement — dutch-book
+    arbitrage doesn't fluctuate the way a directional position does, it's
+    already guaranteed at entry.
+
+    Falls back to cost basis (assumes no unrealized gain/loss) for a
+    ticker with no recent price_history snapshot, rather than guessing at
+    a number with no real data behind it.
+
+    Returns (current_value_cents, cost_basis_cents) — the CALLER already
+    has cost basis available separately in most cases, but returning both
+    here keeps this function usable on its own too.
+    """
+    open_trades = conn.execute(
+        "SELECT ticker, side, count, price_cents FROM shadow_trades WHERE strategy=? AND status='open'",
+        (strategy,),
+    ).fetchall()
+
+    cost_basis = 0
+    current_value = 0
+    for ticker, side, count, price_cents in open_trades:
+        cost_basis += price_cents * count
+        if side == "both":
+            current_value += 100 * count
+            continue
+
+        latest = conn.execute(
+            "SELECT yes_ask, yes_bid FROM price_history WHERE ticker=? ORDER BY ts DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        mark = None
+        if latest is not None:
+            yes_ask, yes_bid = latest
+            mark = yes_bid if side == "yes" else (100 - yes_ask if yes_ask is not None else None)
+        if mark is None:
+            mark = price_cents  # no usable current quote -- assume unchanged rather than guess
+        current_value += mark * count
+
+    return current_value, cost_basis
+
+
 def get_shadow_summary() -> list[dict]:
     """
     One row per strategy: settled count, win rate, total pnl, current
@@ -442,6 +489,7 @@ def get_shadow_summary() -> list[dict]:
                 "SELECT COUNT(*) as n, SUM(price_cents * count) as capital FROM shadow_trades "
                 "WHERE strategy=? AND status='open'", (s,)
             ).fetchone()
+            current_value_cents, _ = _mark_open_positions_to_market(conn, s)
             bankroll_row = conn.execute(
                 "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC LIMIT 1", (s,)
             ).fetchone()
@@ -456,6 +504,8 @@ def get_shadow_summary() -> list[dict]:
                 "settled": n,
                 "open": open_row["n"] or 0,
                 "open_capital_cents": open_row["capital"] or 0,
+                "current_value_cents": current_value_cents,
+                "unrealized_pnl_cents": current_value_cents - (open_row["capital"] or 0),
                 "wins": settled["wins"] or 0,
                 "win_rate": (settled["wins"] or 0) / n if n else None,
                 "total_pnl_cents": total_pnl,
