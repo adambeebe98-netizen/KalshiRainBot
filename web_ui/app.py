@@ -178,7 +178,7 @@ DASHBOARD_PAGE = """
   <h2>Strategy comparison <span style="font-size:12px;color:#8b949e;">(all paper — none of these place real orders)</span></h2>
   <canvas id="strategyChart" height="90"></canvas>
   <table style="margin-top:16px;">
-    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Active</th><th>Deployed</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days tracked</th></tr>
+    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Active</th><th>Deployed</th><th>Current Value</th><th>Unrealized</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days tracked</th></tr>
     {% for s in shadow_summary %}
     <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 and s.enough_data else '' }}>
       <td>{{ s.rank }}</td>
@@ -189,6 +189,10 @@ DASHBOARD_PAGE = """
       </td>
       <td>{{ s.open }}</td>
       <td>${{ "%.2f"|format((s.open_capital_cents or 0)/100) }}</td>
+      <td>${{ "%.2f"|format((s.current_value_cents or 0)/100) }}</td>
+      <td class="{{ 'ok' if (s.unrealized_pnl_cents or 0) >= 0 else 'err' }}">
+        {{ "%+.2f"|format((s.unrealized_pnl_cents or 0)/100) }}
+      </td>
       <td>{{ s.settled }}</td>
       <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
       <td class="{{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">
@@ -197,12 +201,12 @@ DASHBOARD_PAGE = """
       <td>{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</td>
     </tr>
     {% if not s.enough_data %}
-    <tr><td></td><td colspan="9" class="warn" style="font-size:12px;">
+    <tr><td></td><td colspan="11" class="warn" style="font-size:12px;">
       ⚠ Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.
     </td></tr>
     {% endif %}
     {% endfor %}
-    {% if not shadow_summary %}<tr><td colspan="10">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
+    {% if not shadow_summary %}<tr><td colspan="12">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
   </table>
 </div>
 
