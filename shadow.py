@@ -39,6 +39,7 @@ import categories
 import fees
 import storage
 import depth_sizing as lib_depth
+from kalshi_client import market_price_cents
 
 # Position-size scaling for temp_calibrated_confidence_weighted, keyed by
 # rules_extractor's MarketRules.confidence. "low" never actually reaches
@@ -504,10 +505,17 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict],
 
     legs = []  # (ticker, yes_ask, no_ask, measure, station_code)
     for m in markets:
-        yes_ask = m.get("yes_ask")
-        no_ask = m.get("no_ask")
-        if no_ask is None and m.get("yes_bid") is not None:
-            no_ask = 100 - m["yes_bid"]
+        # market_price_cents() reads the real "<field>_dollars" keys
+        # Kalshi's list endpoint actually returns (see its docstring in
+        # kalshi_client.py) — a raw m.get("yes_ask") always silently
+        # returned None here, since that key never existed on this
+        # endpoint. This meant bracket_arbitrage's incomplete-data guard
+        # below fired on literally every bracket set, every cycle.
+        yes_ask = market_price_cents(m, "yes_ask")
+        no_ask = market_price_cents(m, "no_ask")
+        yes_bid = market_price_cents(m, "yes_bid")
+        if no_ask is None and yes_bid is not None:
+            no_ask = 100 - yes_bid
         if yes_ask is None or no_ask is None:
             return  # incomplete data for this event this cycle — skip rather than guess
         legs.append((m["ticker"], yes_ask, no_ask, m.get("measure"), m.get("station_code")))
