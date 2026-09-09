@@ -190,6 +190,81 @@ class TestCurrentOpenMarkets(unittest.TestCase):
         self.assertEqual(row["yes_bid"], 12)
 
 
+class TestWinRateByEdgeBucket(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_computes_edge_correctly_for_yes_and_no_sides(self):
+        # yes: model_prob=0.7, price=40c -> edge = 70-40 = 30c
+        tid1 = storage.log_shadow_trade("calibrated_balanced", "T1", "yes", 10, 40, model_probability=0.7)
+        storage.settle_shadow_trade(tid1, won=True, pnl_cents=600)
+        # no: model_prob=0.3 (yes-side prob), price=40c -> edge = (1-0.3)*100-40 = 30c
+        tid2 = storage.log_shadow_trade("calibrated_balanced", "T2", "no", 10, 40, model_probability=0.3)
+        storage.settle_shadow_trade(tid2, won=False, pnl_cents=-400)
+
+        buckets = storage.get_win_rate_by_edge_bucket()
+        big = next(b for b in buckets if b["edge_bucket"] == "20-+c")
+        self.assertEqual(big["trades"], 2)
+        self.assertEqual(big["win_rate"], 0.5)
+
+    def test_excludes_both_side_arbitrage_trades(self):
+        tid = storage.log_shadow_trade("arbitrage", "T3", "both", 5, 90)
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=50)
+        buckets = storage.get_win_rate_by_edge_bucket()
+        total = sum(b["trades"] for b in buckets)
+        self.assertEqual(total, 0, "arbitrage has no real probability estimate to bucket by edge")
+
+    def test_excludes_trades_with_no_model_probability(self):
+        tid = storage.log_shadow_trade("rain_always_trade", "T4", "yes", 5, 40, model_probability=None)
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=300)
+        buckets = storage.get_win_rate_by_edge_bucket()
+        total = sum(b["trades"] for b in buckets)
+        self.assertEqual(total, 0)
+
+    def test_empty_bucket_shows_none_win_rate_not_a_crash(self):
+        buckets = storage.get_win_rate_by_edge_bucket()
+        for b in buckets:
+            if b["trades"] == 0:
+                self.assertIsNone(b["win_rate"])
+
+
+class TestWinRateByConfidence(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_groups_by_confidence_correctly(self):
+        tid1 = storage.log_shadow_trade("calibrated_balanced", "H1", "yes", 10, 40, confidence="high")
+        storage.settle_shadow_trade(tid1, won=True, pnl_cents=600)
+        tid2 = storage.log_shadow_trade("calibrated_balanced", "M1", "yes", 10, 40, confidence="medium")
+        storage.settle_shadow_trade(tid2, won=False, pnl_cents=-400)
+
+        breakdown = storage.get_win_rate_by_confidence()
+        high = next(c for c in breakdown if c["confidence"] == "high")
+        medium = next(c for c in breakdown if c["confidence"] == "medium")
+        self.assertEqual(high["win_rate"], 1.0)
+        self.assertEqual(medium["win_rate"], 0.0)
+
+    def test_legacy_trades_with_no_confidence_show_as_unknown_not_dropped(self):
+        tid = storage.log_shadow_trade("calibrated_balanced", "OLD1", "yes", 10, 40)  # no confidence
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+        breakdown = storage.get_win_rate_by_confidence()
+        unknown = next((c for c in breakdown if c["confidence"] == "(unknown)"), None)
+        self.assertIsNotNone(unknown)
+        self.assertEqual(unknown["trades"], 1)
+
+    def test_reading_order_is_high_medium_low_unknown(self):
+        for conf in ("medium", "high", "(unknown-placeholder)"):
+            tid = storage.log_shadow_trade("calibrated_balanced", f"T-{conf}", "yes", 10, 40,
+                                             confidence=conf if conf != "(unknown-placeholder)" else None)
+            storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+        breakdown = storage.get_win_rate_by_confidence()
+        confidences = [c["confidence"] for c in breakdown]
+        self.assertEqual(confidences.index("high"), 0)
+        self.assertLess(confidences.index("medium"), confidences.index("(unknown)"))
+
+
 class TestRecentStrategyPerformance(unittest.TestCase):
     def setUp(self):
         storage.init_db()
