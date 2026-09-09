@@ -90,6 +90,57 @@ def max_contracts_within_slippage(ask_levels: list[tuple[int, int]], max_slippag
     return filled
 
 
+def find_max_bracket_size(leg_ask_levels: list[list[tuple[int, int]]], fee_fn,
+                           min_net_edge_cents: int) -> FillEstimate | None:
+    """
+    Sizing for bracket-set arbitrage (see shadow.evaluate_bracket_set):
+    buying one contract of the same side (usually NO) across every leg of
+    a full bracket set guarantees a payout of 100c * (num_legs - 1) per
+    set, since exactly one leg's outcome is true and every OTHER leg pays.
+    Same reasoning as find_max_arbitrage_size for why there's no
+    probability estimate and no slippage limit here — this isn't a bet, so
+    the only thing that should stop the size from growing is real
+    profitability at real depth.
+
+    Walks ALL legs together for increasing set counts — bottlenecked by
+    whichever leg has the SHALLOWEST depth, since every set needs one
+    contract in EVERY included leg, not just some of them.
+    """
+    num_legs = len(leg_ask_levels)
+    if num_legs < 2:
+        return None
+    total_depth = min(sum(c for _, c in levels) for levels in leg_ask_levels)
+    if total_depth < 1:
+        return None
+    step = max(1, total_depth // 20)
+
+    best: FillEstimate | None = None
+    size = step
+    while size <= total_depth:
+        fills = [estimate_fill(levels, size) for levels in leg_ask_levels]
+        if any(f.contracts_fillable < size for f in fills):
+            break  # some leg ran out of depth before the others did
+
+        total_cost = sum(f.total_cost_cents for f in fills)
+        gross_payout = 100 * size * (num_legs - 1)
+        fee_cents = sum(fee_fn(size, round(f.avg_price_cents)) for f in fills)
+        net_edge_total = gross_payout - total_cost - fee_cents
+
+        if net_edge_total >= min_net_edge_cents:
+            best = FillEstimate(
+                contracts_fillable=size,
+                total_cost_cents=total_cost,
+                avg_price_cents=total_cost / size,  # combined avg cost per set across all legs
+                exhausted_book=False,
+            )
+        else:
+            break
+
+        size += step
+
+    return best
+
+
 def find_max_arbitrage_size(yes_ask_levels: list[tuple[int, int]], no_ask_levels: list[tuple[int, int]],
                              fee_fn, min_net_edge_cents: int) -> FillEstimate | None:
     """
