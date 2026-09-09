@@ -428,8 +428,23 @@ def get_series_tickers(kalshi: KalshiClient, cache: dict) -> tuple[str, ...]:
         for keyword in SETTINGS.discovery_keywords:
             discovered.update(kalshi.discover_series_tickers(keyword))
         if discovered:
-            result = tuple(sorted(discovered))
-            log.info(f"Discovered {len(result)} series matching {SETTINGS.discovery_keywords}: {result}")
+            # Core hardcoded series (SETTINGS.series_tickers, e.g. KXRAIN)
+            # always go FIRST, every cycle — sorting the combined set
+            # purely alphabetically meant a series like KXRAIN could land
+            # 130+ deep in a 162-series discovered list (dominated by
+            # KXHIGH*/KXLOW* temperature series alone), starving it for
+            # 20-40+ minutes per cycle at real per-market scan cost
+            # (orderbook fetch + LLM rules extraction each). Confirmed
+            # live: rain_always_trade sat with zero trades for over 20
+            # minutes because KXRAIN simply hadn't come up in rotation yet,
+            # not because of any pricing or logic bug. Discovered extras
+            # still all get scanned every cycle — just never ahead of the
+            # series already known to matter.
+            extras = sorted(discovered - set(SETTINGS.series_tickers))
+            result = tuple(SETTINGS.series_tickers) + tuple(extras)
+            log.info(f"Discovered {len(extras)} additional series matching {SETTINGS.discovery_keywords} "
+                     f"(scanned after the {len(SETTINGS.series_tickers)} configured core series "
+                     f"{SETTINGS.series_tickers}): {result}")
             cache["tickers"] = result
             cache["ts"] = now
             return cache["tickers"]
