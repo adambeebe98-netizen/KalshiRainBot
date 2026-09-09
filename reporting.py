@@ -36,7 +36,7 @@ def tail_log_lines(n: int = 500) -> list[str]:
 def build_export_text(env: dict | None = None) -> str:
     env = env or {}
     lines = []
-    lines.append(f"=== EXPORT generated at {datetime.datetime.utcnow().isoformat()}Z ===")
+    lines.append(f"=== EXPORT generated at {datetime.datetime.now(datetime.timezone.utc).isoformat()} ===")
     lines.append(f"Bot status: {service_status('kalshi-weather-bot')} | "
                  f"Live trading: {env.get('LIVE_TRADING', 'false')} | "
                  f"Risk mode: {env.get('RISK_MODE', 'balanced')}")
