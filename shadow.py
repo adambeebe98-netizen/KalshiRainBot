@@ -308,15 +308,22 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             # No signal needed, no edge computed, no model probability —
             # deliberately. This isn't trying to be good; it's proving the
             # pipeline itself (evaluate -> approve -> size -> log) actually
-            # runs end to end on real rain markets every cycle. Always buys
-            # YES at whatever the current ask is. edge_cents=0 is the
-            # honest value (there's no real edge claim being made here,
-            # unlike every other strategy) — it clears approve_trade only
-            # because this strategy's min_edge_cents_override is also 0.
-            if yes_ask is None or not (1 <= yes_ask <= 99):
+            # runs end to end on real rain markets every cycle. Takes
+            # whichever side has a REAL quoted ask right now (never
+            # invents a price that isn't actually on the book) — many thin
+            # rain brackets only have one side quoted at any given moment
+            # (e.g. a resting bid with no matching ask), so requiring
+            # specifically yes_ask meant this sat idle on markets that DO
+            # have a genuine, tradeable price, just on the no side.
+            if yes_ask is not None and 1 <= yes_ask <= 99:
+                side, price = "yes", yes_ask
+            elif no_ask is not None and 1 <= no_ask <= 99:
+                side, price = "no", no_ask
+            else:
                 continue
-            candidate = lib.StrategyCandidate("yes", yes_ask, edge_cents=0,
-                                               rationale="always-trade pipeline smoke test — ignores edge/model on purpose")
+            candidate = lib.StrategyCandidate(side, price, edge_cents=0,
+                                               rationale="always-trade pipeline smoke test — ignores edge/model on "
+                                                         "purpose, takes whichever side has a real quoted price")
             model_prob = None
 
         else:
