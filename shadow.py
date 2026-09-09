@@ -157,9 +157,27 @@ STRATEGIES = {
     # leave room for execution slippage the fee model doesn't capture.
     # max_price_override is wide because "price" here is the summed cost
     # across the whole bracket set, not one contract (can exceed 99c easily).
-    "bracket_arbitrage":       {"kind": "bracket_arbitrage", "risk": "conservative",
-                                 "min_edge_cents_override": 3, "max_price_override": 5000},
+    # bracket_arbitrage is DISABLED as of 2026-09-09 — 18 settled trades,
+    # 0% win rate, -5656% ROI. This isn't "bad luck": a correctly-hedged
+    # bracket set should structurally WIN most of its individual leg-bets
+    # (buying NO across N mutually-exclusive brackets means exactly 1 of N
+    # legs loses and the other N-1 win, every single time, regardless of
+    # the actual weather) — a 0% win rate across 18 leg-settlements is
+    # close to impossible unless something is inverted (wrong side bought,
+    # a settlement mismatch, or backwards payout math). Real bug, not yet
+    # root-caused. Kept here, commented out, rather than deleted, so
+    # re-enabling later is a one-line change once the bug is found —
+    # historical shadow_trades/decisions rows are left in the database
+    # untouched for whoever eventually debugs this.
+    # "bracket_arbitrage":       {"kind": "bracket_arbitrage", "risk": "conservative",
+    #                              "min_edge_cents_override": 3, "max_price_override": 5000},
 }
+
+# Strategies excluded from dashboard/report summaries despite having
+# historical data — see the bracket_arbitrage disable note above. Kept
+# separate from simply removing the STRATEGIES entry so past trades stay
+# queryable directly, just not surfaced on the leaderboard.
+EXCLUDED_FROM_SUMMARY = {"bracket_arbitrage"}
 
 # Only these strategy+param combinations are ever eligible for an
 # advisor.py suggestion or a dashboard override — the calibrated model and
