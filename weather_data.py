@@ -104,4 +104,46 @@ STATION_REFERENCE = {
     "KMDW": {"name": "Chicago Midway", "lat": 41.7868, "lon": -87.7522},
     "KHOU": {"name": "Houston Hobby", "lat": 29.6454, "lon": -95.2789},
     "KDEN": {"name": "Denver Intl", "lat": 39.8561, "lon": -104.6737},
+    # Added after confirming Kalshi's CLI-prefixed settlement-source codes
+    # were being passed straight through to weather.gov's observation API,
+    # which needs the real ICAO/airport code instead (see
+    # kalshi_station_to_nws_id below) — an entire night's worth of 404s
+    # on every one of these before the translation existed.
+    "KORD": {"name": "Chicago O'Hare Intl", "lat": 41.9742, "lon": -87.9073},
+    "KPHX": {"name": "Phoenix Sky Harbor Intl", "lat": 33.4352, "lon": -112.0101},
+    "KSEA": {"name": "Seattle-Tacoma Intl", "lat": 47.4502, "lon": -122.3088},
+    "KSAN": {"name": "San Diego Intl", "lat": 32.7338, "lon": -117.1933},
+    "KSAT": {"name": "San Antonio Intl", "lat": 29.5312, "lon": -98.4685},
+    "KDCA": {"name": "Washington Reagan National", "lat": 38.8512, "lon": -77.0402},
+    "KDFW": {"name": "Dallas/Fort Worth Intl", "lat": 32.8998, "lon": -97.0403},
+    "KBOS": {"name": "Boston Logan Intl", "lat": 42.3656, "lon": -71.0096},
+    "KATL": {"name": "Atlanta Hartsfield-Jackson Intl", "lat": 33.6407, "lon": -84.4277},
+    "KSFO": {"name": "San Francisco Intl", "lat": 37.6213, "lon": -122.3790},
+    "KMSY": {"name": "New Orleans Louis Armstrong Intl", "lat": 29.9934, "lon": -90.2580},
+    "KOKC": {"name": "Oklahoma City Will Rogers World", "lat": 35.3931, "lon": -97.6007},
 }
+
+
+def kalshi_station_to_nws_id(kalshi_station_code: str | None) -> str | None:
+    """
+    rules_extractor's station_code comes back in Kalshi's OWN
+    settlement-source format ("CLI" + a 3-letter city code, e.g. "CLIHOU"
+    for Houston) — confirmed live via a full night of weather.gov 404s on
+    every single station lookup, since that API needs the real
+    ICAO/airport identifier instead (e.g. "KHOU"). Every case checked
+    follows the same rule: strip the "CLI" prefix, add "K"
+    (CLIHOU->KHOU, CLIAUS->KAUS, CLIORD->KORD, CLIPHX->KPHX, CLISEA->KSEA,
+    CLISAN->KSAN, CLISAT->KSAT, CLIDCA->KDCA, CLIDFW->KDFW, CLIBOS->KBOS,
+    CLIATL->KATL, CLISFO->KSFO, CLIMSY->KMSY, CLIOKC->KOKC).
+
+    Only covers US stations — weather.gov is a US-only NWS system, so an
+    international city (Tokyo, London, Singapore, etc., all of which show
+    up in Kalshi's discovered temperature series) will never get real
+    observation/forecast data through this path no matter how its station
+    code is translated. Returns the input unchanged if it doesn't match
+    the CLI+3-letter pattern, so this is safe to call on anything without
+    needing to know in advance what format a given value is already in.
+    """
+    if kalshi_station_code and kalshi_station_code.startswith("CLI") and len(kalshi_station_code) == 6:
+        return "K" + kalshi_station_code[3:]
+    return kalshi_station_code
