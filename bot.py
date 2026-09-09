@@ -192,6 +192,18 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             storage.log_price_snapshot(ticker, market.get("yes_ask"), market.get("yes_bid"))
 
             yes_price = market.get("yes_ask") or market.get("last_price")
+            if yes_price is None and market.get("no_bid") is not None:
+                # Symmetric case to the no_ask-from-yes_bid inversion a few
+                # lines below: a resting NO bid at price P is the exact
+                # same underlying liquidity as an implied YES ask at
+                # (100-P) — buying YES at (100-P) and someone else buying
+                # NO at P settle the same trade. Kalshi's market-list
+                # endpoint can return yes_ask as null even when this
+                # synthetic equivalent exists; without this, a market with
+                # only resting NO-side liquidity looked exactly like a
+                # market with no liquidity at all, and got silently skipped
+                # as "no tradeable quote yet."
+                yes_price = 100 - market["no_bid"]
             if not yes_price:
                 storage.log_decision(ticker, "n/a", 0, 0.5, 0, "skipped",
                                       "no live ask quote or trade history yet — nothing to price a signal against",
