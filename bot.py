@@ -549,6 +549,7 @@ def main():
              f"auto-discover series: {SETTINGS.auto_discover_series} (keywords={SETTINGS.discovery_keywords})")
 
     advisor_interval = getattr(SETTINGS, "advisor_interval_seconds", 7 * 24 * 3600)
+    retrospective_interval = getattr(SETTINGS, "retrospective_interval_seconds", 24 * 3600)
     series_cache: dict = {}
     consecutive_failures = 0
     while True:
@@ -574,6 +575,20 @@ def main():
                     advisor.generate_suggestions()
                 except Exception as e:
                     log.warning(f"Advisor run failed (non-fatal, trading continues): {e}")
+
+            # Daily (by default) qualitative post-mortem — a separate,
+            # stronger-boundaried review from advisor.py above: this one
+            # writes prose only (see retrospective.py's module docstring),
+            # nothing structured or applyable, ever. More frequent than
+            # advisor's weekly cadence on purpose, since there's a lot of
+            # fresh trade data to learn from early on.
+            last_retro_run = float(storage.get_meta("last_retrospective_run_ts", "0"))
+            if time.time() - last_retro_run > retrospective_interval:
+                try:
+                    import retrospective
+                    retrospective.generate_retrospective()
+                except Exception as e:
+                    log.warning(f"Retrospective run failed (non-fatal, trading continues): {e}")
 
             consecutive_failures = 0
         except Exception as e:
