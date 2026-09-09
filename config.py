@@ -30,9 +30,9 @@ def _int(name: str, default: int) -> int:
 # MIN_EDGE_CENTS / MAX_POSITION_PCT / MAX_DAILY_LOSS_PCT env vars, if set,
 # always override whatever the preset supplies.
 RISK_PRESETS = {
-    "conservative": {"min_edge_cents": 10, "max_position_pct": 0.015, "max_daily_loss_pct": 0.04, "max_contracts_per_trade": 15},
-    "balanced":     {"min_edge_cents": 6,  "max_position_pct": 0.03,  "max_daily_loss_pct": 0.06, "max_contracts_per_trade": 25},
-    "aggressive":   {"min_edge_cents": 3,  "max_position_pct": 0.05,  "max_daily_loss_pct": 0.10, "max_contracts_per_trade": 40},
+    "conservative": {"min_edge_cents": 10, "max_position_pct": 0.015, "max_daily_loss_pct": 0.04, "max_contracts_per_trade": 15, "max_slippage_cents": 3},
+    "balanced":     {"min_edge_cents": 6,  "max_position_pct": 0.03,  "max_daily_loss_pct": 0.06, "max_contracts_per_trade": 25, "max_slippage_cents": 6},
+    "aggressive":   {"min_edge_cents": 3,  "max_position_pct": 0.05,  "max_daily_loss_pct": 0.10, "max_contracts_per_trade": 40, "max_slippage_cents": 12},
 }
 _RISK_MODE = os.getenv("RISK_MODE", "balanced").strip().lower()
 _PRESET = RISK_PRESETS.get(_RISK_MODE, RISK_PRESETS["balanced"])
@@ -79,6 +79,7 @@ class Settings:
     # max_position_pct — see RiskPreset.max_contracts_per_trade's docstring
     # in risk_manager.py for why both are needed together.
     max_contracts_per_trade: int = _int("MAX_CONTRACTS_PER_TRADE", _PRESET["max_contracts_per_trade"])
+    max_slippage_cents: int = _int("MAX_SLIPPAGE_CENTS", _PRESET["max_slippage_cents"])
     min_contract_price_cents: int = _int("MIN_CONTRACT_PRICE_CENTS", 2)
     max_contract_price_cents: int = _int("MAX_CONTRACT_PRICE_CENTS", 90)
     max_open_positions: int = _int("MAX_OPEN_POSITIONS", 15)
