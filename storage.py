@@ -377,9 +377,19 @@ def get_shadow_summary() -> list[dict]:
     shared) so the dashboard/export show a ranked leaderboard, not an
     arbitrary DISTINCT-query order.
     """
+    # Strategies excluded despite having historical bankroll snapshots —
+    # bracket_arbitrage disabled 2026-09-09 (18 settled trades, 0% win
+    # rate, -5656% ROI — a real, not-yet-root-caused bug: a correctly
+    # hedged bracket set should structurally win most of its individual
+    # leg-bets, so a 0% win rate means something is inverted, not bad
+    # luck). Not deleted from shadow.py's STRATEGIES, just commented out
+    # there and filtered from the leaderboard here — historical rows stay
+    # queryable directly for whoever eventually debugs it.
+    excluded = {"bracket_arbitrage"}
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
-        strategies = [r["strategy"] for r in conn.execute("SELECT DISTINCT strategy FROM shadow_bankroll_snapshots")]
+        strategies = [r["strategy"] for r in conn.execute("SELECT DISTINCT strategy FROM shadow_bankroll_snapshots")
+                      if r["strategy"] not in excluded]
         summary = []
         for s in strategies:
             settled = conn.execute(
@@ -440,7 +450,8 @@ def get_shadow_summary_by_category() -> dict[str, dict]:
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT strategy, measure, pnl_cents FROM shadow_trades WHERE status IN ('won','lost','sold')"
+            "SELECT strategy, measure, pnl_cents FROM shadow_trades WHERE status IN ('won','lost','sold') "
+            "AND strategy NOT IN ('bracket_arbitrage')"  # see get_shadow_summary()'s exclusion note
         ).fetchall()
 
     from collections import defaultdict
