@@ -684,6 +684,8 @@ def get_decision_summary(hours: int = 24) -> dict:
             return "position size too small for bankroll"
         if r.startswith("orderbook fetch failed"):
             return "orderbook fetch failed"
+        if r.startswith("rules extraction failed"):
+            return "rules extraction failed (network or API issue, not a bad-data problem)"
         if "no size clears net-of-fee edge" in r:
             return "no profitable size at real order-book depth"
         return reason[:70]
