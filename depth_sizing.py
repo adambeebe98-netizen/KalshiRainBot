@@ -83,6 +83,24 @@ def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_pr
     a cleverer search would be.
     """
     best: FillEstimate | None = None
+    # max_contracts_cap comes from the bankroll/position-pct math and knows
+    # nothing about how much is actually sitting in the book — clamping it
+    # to the real total depth first means the step below is always sized to
+    # what's realistically fillable. Without this, a thin book (say 35
+    # contracts total) against a large cap (say 750, from a healthy
+    # bankroll) produces a step of 750//20=37 — bigger than the ENTIRE
+    # book — so the very first size tried already exceeds available depth,
+    # the loop breaks immediately, and a genuinely profitable 35-contract
+    # fill is missed entirely and this returns None instead. Found while
+    # extending this to shadow strategies (many more callers exercising
+    # thin books), but this same gap has been live in the main bot's real
+    # order-sizing path the whole time — it just needed a book thinner than
+    # bankroll/20 to trigger, which is rarer there than across 16+ shadow
+    # strategies each with their own bankroll.
+    total_book_depth = sum(count for _, count in ask_levels)
+    max_contracts_cap = min(max_contracts_cap, total_book_depth)
+    if max_contracts_cap < 1:
+        return None
     # Step through in reasonable increments rather than every integer —
     # every contract count would be needless precision for a decision this
     # coarse-grained anyway.
