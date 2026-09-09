@@ -182,7 +182,7 @@ DASHBOARD_PAGE = """
     {% for s in shadow_summary %}
     <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 and s.enough_data else '' }}>
       <td>{{ s.rank }}</td>
-      <td>{{ s.strategy }}</td>
+      <td>{{ s.strategy }}{% if s.dampened %} <span title="This strategy's position sizing is automatically reduced right now due to a recent losing streak — see shadow.py's performance_dampening_multiplier. It recovers on its own as the streak ages out of the rolling window." style="color:#d29922;">⚠ cooling off</span>{% endif %}</td>
       <td>${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</td>
       <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">
         {{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}
@@ -293,6 +293,36 @@ DASHBOARD_PAGE = """
         <td>{{ c.model_avg }}</td><td>{{ c.actual_avg }}</td><td>{{ c.bias }}</td></tr>
     {% endfor %}
     {% if not calibration_rows %}<tr><td colspan="6">No calibration data yet — needs settled trades.</td></tr>{% endif %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>Does the model's own confidence predict outcomes? <span style="font-size:12px;color:#8b949e;">(quantitative, not LLM-based — a direct check on whether bigger claimed edge or higher confidence actually wins more)</span></h2>
+  <p style="font-size:13px;color:#8b949e;margin-bottom:4px;">By estimated edge at decision time:</p>
+  <table>
+    <tr><th>Edge size</th><th>Settled trades</th><th>Win rate</th><th>Total P&L</th></tr>
+    {% for b in edge_buckets %}
+    <tr><td>{{ b.edge_bucket }}</td><td>{{ b.trades }}</td>
+        <td>{{ "%.0f%%"|format(b.win_rate*100) if b.win_rate is not none else "—" }}</td>
+        <td class="{{ 'ok' if (b.total_pnl_cents or 0) >= 0 else 'err' }}">
+          {{ "%.2f"|format((b.total_pnl_cents or 0)/100) }}
+        </td></tr>
+    {% endfor %}
+    {% if not edge_buckets or edge_buckets|sum(attribute='trades') == 0 %}
+    <tr><td colspan="4">No settled trades with a real model probability yet.</td></tr>
+    {% endif %}
+  </table>
+  <p style="font-size:13px;color:#8b949e;margin:12px 0 4px;">By rules-extraction confidence:</p>
+  <table>
+    <tr><th>Confidence</th><th>Settled trades</th><th>Win rate</th><th>Total P&L</th></tr>
+    {% for c in confidence_breakdown %}
+    <tr><td>{{ c.confidence }}</td><td>{{ c.trades }}</td>
+        <td>{{ "%.0f%%"|format(c.win_rate*100) if c.win_rate is not none else "—" }}</td>
+        <td class="{{ 'ok' if (c.total_pnl_cents or 0) >= 0 else 'err' }}">
+          {{ "%.2f"|format((c.total_pnl_cents or 0)/100) }}
+        </td></tr>
+    {% endfor %}
+    {% if not confidence_breakdown %}<tr><td colspan="4">No settled trades yet.</td></tr>{% endif %}
   </table>
 </div>
 
@@ -486,8 +516,18 @@ def dashboard():
     open_markets = []
     decision_summary = {"counts": {"traded": 0, "skipped": 0, "total": 0}, "skip_reasons": {}}
     latest_retrospective = None
+    edge_buckets = []
+    confidence_breakdown = []
     try:
         shadow_summary = storage.get_shadow_summary()
+        for s in shadow_summary:
+            # Surfaces the automatic performance-dampening mechanism (see
+            # shadow.performance_dampening_multiplier) on the dashboard —
+            # it runs silently otherwise, and a strategy suddenly sizing
+            # smaller with no visible explanation would just look like a
+            # bug.
+            perf = storage.get_recent_strategy_performance(s["strategy"])
+            s["dampened"] = shadow.performance_dampening_multiplier(perf) < 1.0
         category_summary = storage.get_shadow_summary_by_category()
         for name in shadow.STRATEGIES.keys():
             history = storage.get_shadow_bankroll_history(name, limit=500)
@@ -506,6 +546,8 @@ def dashboard():
             age_s = now - r["ts"]
             ago = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
             latest_retrospective = {**r, "ago": ago}
+        edge_buckets = storage.get_win_rate_by_edge_bucket()
+        confidence_breakdown = storage.get_win_rate_by_confidence()
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -526,6 +568,8 @@ def dashboard():
         decision_summary=decision_summary,
         suggestions=storage.get_suggestions(status="pending"),
         latest_retrospective=latest_retrospective,
+        edge_buckets=edge_buckets,
+        confidence_breakdown=confidence_breakdown,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
