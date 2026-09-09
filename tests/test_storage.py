@@ -190,5 +190,41 @@ class TestCurrentOpenMarkets(unittest.TestCase):
         self.assertEqual(row["yes_bid"], 12)
 
 
+class TestRecentStrategyPerformance(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_aggregates_pnl_and_cost_correctly(self):
+        for i in range(5):
+            tid = storage.log_shadow_trade("calibrated_balanced", f"L{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        for i in range(3):
+            tid = storage.log_shadow_trade("calibrated_balanced", f"W{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+        perf = storage.get_recent_strategy_performance("calibrated_balanced", lookback=20)
+        self.assertEqual(perf["trades"], 8)
+        self.assertEqual(perf["total_pnl_cents"], -200)
+        self.assertEqual(perf["total_cost_cents"], 3200)
+        self.assertAlmostEqual(perf["roi_pct"], (-200 / 3200) * 100, places=4)
+
+    def test_lookback_limits_to_most_recent_trades(self):
+        for i in range(10):
+            tid = storage.log_shadow_trade("calibrated_balanced", f"T{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        perf = storage.get_recent_strategy_performance("calibrated_balanced", lookback=3)
+        self.assertEqual(perf["trades"], 3)
+
+    def test_no_trades_returns_safe_defaults(self):
+        perf = storage.get_recent_strategy_performance("nonexistent_strategy")
+        self.assertEqual(perf["trades"], 0)
+        self.assertIsNone(perf["roi_pct"])
+
+    def test_open_trades_are_never_included(self):
+        storage.log_shadow_trade("calibrated_balanced", "OPEN1", "yes", 10, 40)
+        perf = storage.get_recent_strategy_performance("calibrated_balanced")
+        self.assertEqual(perf["trades"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
