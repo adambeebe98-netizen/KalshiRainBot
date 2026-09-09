@@ -41,7 +41,8 @@ from kalshi_client import KalshiClient, market_price_cents
 from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
 from strategy import evaluate_market, evaluate_temperature_market, pick_relevant_forecast_temp_f
-from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE, kalshi_station_to_nws_id
+from weather_data import (get_station_latest_observation, get_forecast_pop, STATION_REFERENCE,
+                           kalshi_station_to_nws_id, looks_like_us_station)
 import depth_sizing
 import fees
 import settlement
@@ -273,10 +274,22 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 observation = get_station_latest_observation(station)
                 ref = STATION_REFERENCE[station]
                 forecast = get_forecast_pop(ref["lat"], ref["lon"])
-            elif station:
+            elif looks_like_us_station(station):
+                # Plausible US ICAO code not yet in STATION_REFERENCE —
+                # still worth trying weather.gov for the observation even
+                # without forecast coordinates on file, since it might
+                # genuinely resolve.
                 observation = get_station_latest_observation(station)
                 # No lat/lon on file for forecast lookup — add it to STATION_REFERENCE
                 # in weather_data.py to enable forecast-based signals for this station.
+            # else: station doesn't look like a US station at all (e.g.
+            # RJTT/Tokyo, EGLL/London, WSSS/Singapore — every international
+            # city seen in Kalshi's discovered temperature series uses a
+            # non-K ICAO prefix). weather.gov is a US-only NWS system, so
+            # this call would 404 every single cycle with zero chance of
+            # ever succeeding — skipped entirely rather than paying that
+            # cost and adding log noise for something that can't be fixed
+            # from this side.
 
             # 3. Evaluate — routed by measure type, since precipitation and
             # temperature markets need different models (they used to both
