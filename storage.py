@@ -387,6 +387,10 @@ def get_shadow_summary() -> list[dict]:
                 "SUM(COALESCE(pnl_cents,0)) as total_pnl FROM shadow_trades "
                 "WHERE strategy=? AND status IN ('won','lost','sold')", (s,)
             ).fetchone()
+            open_row = conn.execute(
+                "SELECT COUNT(*) as n, SUM(price_cents * count) as capital FROM shadow_trades "
+                "WHERE strategy=? AND status='open'", (s,)
+            ).fetchone()
             bankroll_row = conn.execute(
                 "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC LIMIT 1", (s,)
             ).fetchone()
@@ -399,6 +403,8 @@ def get_shadow_summary() -> list[dict]:
             summary.append({
                 "strategy": s,
                 "settled": n,
+                "open": open_row["n"] or 0,
+                "open_capital_cents": open_row["capital"] or 0,
                 "wins": settled["wins"] or 0,
                 "win_rate": (settled["wins"] or 0) / n if n else None,
                 "total_pnl_cents": total_pnl,
