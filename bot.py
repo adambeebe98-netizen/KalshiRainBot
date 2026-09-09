@@ -41,7 +41,7 @@ from kalshi_client import KalshiClient, market_price_cents
 from rules_extractor import RulesExtractor
 from risk_manager import RiskManager, RiskState
 from strategy import evaluate_market, evaluate_temperature_market, pick_relevant_forecast_temp_f
-from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE
+from weather_data import get_station_latest_observation, get_forecast_pop, STATION_REFERENCE, kalshi_station_to_nws_id
 import depth_sizing
 import fees
 import settlement
@@ -262,7 +262,12 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 continue
 
             # 2. Pull weather data for the named station, if we know it.
-            station = rules.station_code
+            # kalshi_station_to_nws_id() translates rules.station_code (Kalshi's
+            # own "CLI"-prefixed settlement-source format) into the real
+            # ICAO/airport code weather.gov and STATION_REFERENCE both use —
+            # without this, every single one of these lookups 404s, silently,
+            # regardless of which city it is.
+            station = kalshi_station_to_nws_id(rules.station_code)
             observation, forecast = None, []
             if station and station in STATION_REFERENCE:
                 observation = get_station_latest_observation(station)
