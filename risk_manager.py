@@ -100,11 +100,23 @@ class RiskManager:
         self.state = state
         self.preset = preset or default_preset()
 
-    def max_contracts_for_trade(self, price_cents: int) -> int:
+    def max_contracts_for_trade(self, price_cents: int, apply_contract_cap: bool = True) -> int:
         if price_cents <= 0:
             return 0
         max_risk_cents = int(self.state.bankroll_cents * self.preset.max_position_pct)
         pct_based_cap = max(0, max_risk_cents // price_cents)
+        if not apply_contract_cap:
+            # Arbitrage (see shadow.py's "arbitrage"/"bracket_arbitrage"
+            # kinds) isn't a probabilistic bet — its edge comes from real,
+            # near-guaranteed mispricing, not a model estimate that could
+            # be wrong. max_contracts_per_trade and max_slippage_cents
+            # exist specifically to hedge against model uncertainty on
+            # directional bets; they don't belong on arbitrage sizing,
+            # which should size purely off "does this stay profitable at
+            # real walked depth" (find_max_arbitrage_size in
+            # depth_sizing.py) plus this SAME dollar-based bankroll cap —
+            # just without the extra, bet-specific ceiling stacked on top.
+            return pct_based_cap
         return min(pct_based_cap, self.preset.max_contracts_per_trade)
 
     def approve_trade(self, price_cents: int, edge_cents: int, edge_already_net_of_fees: bool = False) -> tuple[bool, str]:
