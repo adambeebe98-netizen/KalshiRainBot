@@ -69,20 +69,33 @@ log = logging.getLogger("kalshi_weather_bot")
 RAIN_MAX_HORIZON_HOURS = 30
 
 
-def is_far_future_rain(ticker: str, close_time_str: str | None) -> bool:
+def is_far_future_rain(close_time_str: str | None) -> bool:
     """
-    Cheap, ticker-name-based heuristic ("RAIN" in the ticker) rather than
-    the authoritative rules_extractor measure classification — deliberately
-    so this check can run BEFORE any per-market API calls or LLM-based
-    classification, on every scanned market, every cycle. In practice every
-    real precipitation series observed so far (KXRAIN, KXRAINNYCM,
-    KXRAINSEAM, KXRAINHOU, KXRAINMIA, KXRAINSFOM, ...) is consistently
-    prefixed this way. Fails OPEN (returns False) on anything that can't be
-    parsed — a missing/malformed close_time should never cause a real,
-    tradeable rain market to silently disappear; the cost of occasionally
-    showing one extra far-future market is much lower than hiding a real one.
+    Called only for markets ALREADY classified as measure=='precipitation_daily'
+    (see bot.py) — daily rain resolves same-day, so a market whose close
+    time is still far out is pure forecast noise with no real observation
+    grounding yet. Deliberately NOT applied to precipitation_monthly (a
+    genuinely long-horizon question by design, not a same-day one) or
+    temperature bracket arbitrage (doesn't depend on forecast accuracy at
+    all — see shadow.evaluate_bracket_set).
+
+    Fails OPEN (returns False) on a missing/malformed close_time — a
+    parsing hiccup should never make a real, tradeable same-day market
+    silently disappear.
+
+    (Earlier version of this also did its own "RAIN in ticker" name
+    matching so it could run cheaply BEFORE rules extraction, avoiding an
+    API call for a market about to be skipped anyway. That heuristic
+    couldn't tell precipitation_daily apart from precipitation_monthly,
+    though, and ended up silently blocking every monthly-cumulative rain
+    market too — e.g. KXRAINSEAM, KXRAINSFOM — which should get the same
+    long horizon as temperature bracket arbitrage, not the daily-only
+    cutoff. Moved to run AFTER the real measure classification instead:
+    rules_extractor caches per-ticker, so this only costs one real
+    classification call per ticker ever, not per cycle — a mixup between
+    daily and monthly is the more expensive mistake to guard against now.)
     """
-    if "RAIN" not in ticker.upper() or not close_time_str:
+    if not close_time_str:
         return False
     try:
         close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
@@ -190,13 +203,6 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
         for market in found:
             ticker = market["ticker"]
 
-            if is_far_future_rain(ticker, market.get("close_time")):
-                storage.log_decision(ticker, "n/a", 0, 0.5, 0, "skipped",
-                                      f"rain market more than {RAIN_MAX_HORIZON_HOURS}h out — "
-                                      "rain signals are same-day/real-time only, unlike temperature "
-                                      "bracket arbitrage which doesn't depend on forecast accuracy", mode)
-                continue
-
             # Log a price point for EVERY scanned market, regardless of
             # whether it currently has a tradeable price — this is what
             # feeds the dashboard's "Open markets" view and the raw data
@@ -258,6 +264,18 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             # go through the rain model, which silently produced meaningless
             # signals for temperature markets).
             if rules.measure in ("precipitation_daily", "precipitation_monthly"):
+                # Only precipitation_daily gets the same-day horizon check —
+                # precipitation_monthly is a genuinely long-horizon question
+                # by design (see is_far_future_rain's docstring for why the
+                # ticker-name-based version of this check used to wrongly
+                # catch monthly-cumulative markets too).
+                if rules.measure == "precipitation_daily" and is_far_future_rain(market.get("close_time")):
+                    storage.log_decision(ticker, "n/a", yes_price, 0.5, 0, "skipped",
+                                          f"rain market more than {RAIN_MAX_HORIZON_HOURS}h out — "
+                                          "rain signals are same-day/real-time only, unlike temperature "
+                                          "bracket arbitrage or precipitation_monthly, neither of which "
+                                          "depend on near-term forecast accuracy", mode)
+                    continue
                 signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
                 current_forecast_temp_f = previous_forecast_temp_f = None
             elif rules.measure in ("temperature_high", "temperature_low"):
