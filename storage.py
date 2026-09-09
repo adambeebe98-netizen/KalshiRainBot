@@ -339,6 +339,47 @@ def close_shadow_trade_sold(trade_id: int, pnl_cents: int) -> None:
         )
 
 
+def get_todays_realized_pnl_cents(strategy: str) -> int:
+    """
+    Reconstructs "how much has this shadow strategy already won/lost
+    today" from shadow_trades' own settled_ts/pnl_cents columns — no new
+    schema needed, since that data was already being recorded.
+
+    This matters because RiskState.realized_pnl_today_cents (the number
+    the daily kill switch actually checks) otherwise starts at 0 on every
+    process restart, REGARDLESS of what already happened earlier that same
+    calendar day. Confirmed: the bot restarted many times today alone —
+    every one of those restarts would have silently reset any tripped
+    kill switch back to "fresh," completely defeating the daily loss
+    limit's actual purpose. Called once at engine-creation time
+    (get_engines()) to seed the real value instead of assuming zero.
+
+    Assumes the server's local timezone matches SQLite's UTC-based date()
+    — true on a standard UTC-configured droplet (confirmed via tonight's
+    own systemctl output), but would silently drift out of sync with
+    Python's date.today() (used for the day-rollover check) if that ever
+    changed. Worth revisiting if the server's timezone is ever reconfigured.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT SUM(pnl_cents) FROM shadow_trades WHERE strategy=? AND status IN ('won','lost','sold') "
+            "AND settled_ts IS NOT NULL AND date(settled_ts, 'unixepoch') = date('now')",
+            (strategy,),
+        ).fetchone()
+        return row[0] or 0
+
+
+def get_todays_realized_pnl_cents_main() -> int:
+    """Same idea as get_todays_realized_pnl_cents(), for the main bot's own
+    real (or paper-mode) trades table instead of a specific shadow strategy."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT SUM(pnl_cents) FROM trades WHERE status IN ('won','lost') "
+            "AND settled_ts IS NOT NULL AND date(settled_ts, 'unixepoch') = date('now')"
+        ).fetchone()
+        return row[0] or 0
+
+
 def snapshot_shadow_bankroll(strategy: str, bankroll_cents: int) -> None:
     with get_conn() as conn:
         conn.execute(
