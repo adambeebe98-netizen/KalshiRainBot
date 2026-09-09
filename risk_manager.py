@@ -36,6 +36,21 @@ class RiskPreset:
     min_contract_price_cents: int = 2
     max_contract_price_cents: int = 90
     max_open_positions: int = 15
+    # A SEPARATE ceiling from max_position_pct, on purpose: max_position_pct
+    # is bankroll * pct / price — as bankroll grows from wins, that number
+    # grows right along with it, with zero connection to how much real
+    # liquidity actually sits in a thin Kalshi weather market. Feeding an
+    # ever-growing contract target into depth_sizing's search just walks
+    # further into the book each time, degrading the realized average price
+    # (0.55 -> 0.60, etc.) until edge that looked fine on paper barely
+    # survives, or doesn't. This cap is a fixed, price- and
+    # bankroll-independent number instead — "don't try to buy more than N
+    # contracts of one thin market, regardless of price or how large the
+    # bankroll has grown" — and max_contracts_for_trade takes the SMALLER of
+    # the two, so both protections apply at once: never risk more than
+    # max_position_pct of bankroll, AND never chase size the book can't
+    # reasonably absorb without hurting the fill.
+    max_contracts_per_trade: int = 25
 
 
 def default_preset() -> RiskPreset:
@@ -48,6 +63,7 @@ def default_preset() -> RiskPreset:
         min_contract_price_cents=SETTINGS.min_contract_price_cents,
         max_contract_price_cents=SETTINGS.max_contract_price_cents,
         max_open_positions=SETTINGS.max_open_positions,
+        max_contracts_per_trade=SETTINGS.max_contracts_per_trade,
     )
 
 
@@ -77,7 +93,8 @@ class RiskManager:
         if price_cents <= 0:
             return 0
         max_risk_cents = int(self.state.bankroll_cents * self.preset.max_position_pct)
-        return max(0, max_risk_cents // price_cents)
+        pct_based_cap = max(0, max_risk_cents // price_cents)
+        return min(pct_based_cap, self.preset.max_contracts_per_trade)
 
     def approve_trade(self, price_cents: int, edge_cents: int, edge_already_net_of_fees: bool = False) -> tuple[bool, str]:
         today = date.today()
