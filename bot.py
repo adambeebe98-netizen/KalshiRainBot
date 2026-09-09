@@ -319,6 +319,7 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             fill = depth_sizing.find_max_profitable_size(
                 ask_levels, fees.taker_fee_cents, signal.model_probability,
                 max_contracts_cap=flat_cap_contracts, min_net_edge_cents=risk.preset.min_edge_cents,
+                max_slippage_cents=risk.preset.max_slippage_cents,
             )
             if fill is None:
                 storage.log_decision(ticker, signal.side, yes_price, signal.model_probability,
