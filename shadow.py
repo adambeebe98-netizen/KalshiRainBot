@@ -85,6 +85,18 @@ STRATEGIES = {
     "rain_calibrated_conservative": {"kind": "calibrated", "risk": "conservative", "category_filter": "Rain"},
     "rain_calibrated_balanced":     {"kind": "calibrated", "risk": "balanced",     "category_filter": "Rain"},
     "rain_calibrated_aggressive":   {"kind": "calibrated", "risk": "aggressive",   "category_filter": "Rain"},
+    # PIPELINE SMOKE TEST — not a real strategy, doesn't try to be
+    # profitable, doesn't even use the model's edge estimate. The point is
+    # only to prove evaluate -> approve -> size -> log actually executes
+    # end to end on real rain markets every cycle, since that's been the
+    # open question tonight. min_edge_cents_override=0 and
+    # max_price_override=99 mean it accepts basically any priced market;
+    # max_daily_loss_pct_override=1.0 means a losing streak (expected and
+    # fine — it's paper money and isn't trying to win) never trips the
+    # kill switch and stops it from doing its one job of just trading.
+    "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
+                            "min_edge_cents_override": 0, "max_price_override": 99,
+                            "max_daily_loss_pct_override": 1.0},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
     # edge — a much lower bar clears it (even 1-2c guaranteed is worth
     # taking in theory; real fees would eat small amounts, which is exactly
@@ -185,7 +197,7 @@ def _build_preset(cfg: dict) -> RiskPreset:
     return RiskPreset(
         min_edge_cents=cfg.get("min_edge_cents_override", p["min_edge_cents"]),
         max_position_pct=p["max_position_pct"],
-        max_daily_loss_pct=p["max_daily_loss_pct"],
+        max_daily_loss_pct=cfg.get("max_daily_loss_pct_override", p["max_daily_loss_pct"]),
         min_contract_price_cents=SETTINGS.min_contract_price_cents,
         max_contract_price_cents=cfg.get("max_price_override", SETTINGS.max_contract_price_cents),
         max_open_positions=SETTINGS.max_open_positions,
@@ -292,13 +304,35 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
             model_prob = signal.model_probability_yes
 
+        elif kind == "always_trade":
+            # No signal needed, no edge computed, no model probability —
+            # deliberately. This isn't trying to be good; it's proving the
+            # pipeline itself (evaluate -> approve -> size -> log) actually
+            # runs end to end on real rain markets every cycle. Always buys
+            # YES at whatever the current ask is. edge_cents=0 is the
+            # honest value (there's no real edge claim being made here,
+            # unlike every other strategy) — it clears approve_trade only
+            # because this strategy's min_edge_cents_override is also 0.
+            if yes_ask is None or not (1 <= yes_ask <= 99):
+                continue
+            candidate = lib.StrategyCandidate("yes", yes_ask, edge_cents=0,
+                                               rationale="always-trade pipeline smoke test — ignores edge/model on purpose")
+            model_prob = None
+
         else:
             continue
 
         if not candidate:
             continue
 
-        approved, reason = rm.approve_trade(candidate.price_cents, candidate.edge_cents)
+        # always_trade doesn't claim any real edge to check fees against in
+        # the first place (see its branch above) — edge_already_net_of_fees
+        # is being reused here to skip that check entirely, not because
+        # fees were actually computed, but because "does 0 edge survive
+        # fees" is a nonsensical question for a strategy that isn't making
+        # an edge claim at all.
+        approved, reason = rm.approve_trade(candidate.price_cents, candidate.edge_cents,
+                                             edge_already_net_of_fees=(kind == "always_trade"))
         if not approved:
             continue
 
