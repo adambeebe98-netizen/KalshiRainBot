@@ -96,7 +96,7 @@ STRATEGIES = {
     # fine — it's paper money and isn't trying to win) never trips the
     # kill switch and stops it from doing its one job of just trading.
     "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
-                            "station_filter": "KHOU",
+                            "station_filter": ["KAUS", "KLAS", "KMDW", "KHOU", "KDEN"],
                             "min_edge_cents_override": 0, "max_price_override": 99,
                             "max_daily_loss_pct_override": 1.0},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
@@ -260,13 +260,20 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             continue
 
         # Same idea, one level narrower: a strategy can also be pinned to
-        # ONE specific station (e.g. rain_always_trade -> KHOU/Houston) —
-        # useful for cutting every other source of variation (which city,
-        # which day, discovery noise) down to a single, well-known market
-        # while diagnosing whether the pipeline itself fires at all.
+        # a small set of specific stations (e.g. rain_always_trade -> every
+        # currently-configured major metro) — cuts down every OTHER source
+        # of variation (which day, discovery noise, unrecognized measures)
+        # while diagnosing whether the pipeline fires at all, without
+        # betting everything on one single city that might just be quiet
+        # at any given moment (confirmed live: KHOU had zero quotes on
+        # either side for a stretch — not a bug, just that one market
+        # having nothing resting on its book right then). Accepts either a
+        # single station string or a list of them.
         station_filter = cfg.get("station_filter")
-        if station_filter and station_code != station_filter:
-            continue
+        if station_filter:
+            allowed_stations = station_filter if isinstance(station_filter, (list, tuple, set)) else {station_filter}
+            if station_code not in allowed_stations:
+                continue
 
         if kind in ("calibrated", "calibrated_confidence_weighted"):
             if not signal:
