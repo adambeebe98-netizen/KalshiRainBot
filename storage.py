@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
                                   -- context that makes root-cause analysis useful. Only populated
                                   -- for trades logged after this field was added; older rows are
                                   -- NULL, not an error.
+    confidence TEXT,              -- rules_extractor.MarketRules.confidence ('high'|'medium'|'low')
+                                   -- at decision time — lets analytics actually check whether
+                                   -- confidence level predicts real outcomes, instead of just
+                                   -- assuming the sizing multiplier it already drives is correct.
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -193,6 +197,7 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN precomputed_payout_cents INTEGER",
         "ALTER TABLE shadow_trades ADD COLUMN sample_member_ticker TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN rationale TEXT",
+        "ALTER TABLE shadow_trades ADD COLUMN confidence TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -323,15 +328,17 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       measure: str | None = None, exit_target_cents: int | None = None,
                       precomputed_payout_cents: int | None = None,
                       sample_member_ticker: str | None = None,
-                      rationale: str | None = None) -> int:
+                      rationale: str | None = None,
+                      confidence: str | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
             "model_probability, station_code, measure, exit_target_cents, "
-            "precomputed_payout_cents, sample_member_ticker, rationale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "precomputed_payout_cents, sample_member_ticker, rationale, confidence) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
-             precomputed_payout_cents, sample_member_ticker, rationale),
+             precomputed_payout_cents, sample_member_ticker, rationale, confidence),
         )
         return cur.lastrowid
 
@@ -624,6 +631,93 @@ def get_shadow_summary() -> list[dict]:
         for i, row in enumerate(summary, start=1):
             row["rank"] = i
         return summary
+
+
+def get_win_rate_by_edge_bucket() -> list[dict]:
+    """
+    Does a bigger claimed edge actually predict a better outcome, or is
+    the model's edge_cents just noise dressed up as confidence? Buckets
+    every settled trade with a real model_probability by its ESTIMATED
+    edge size at decision time, computed from stored columns rather than
+    a new field: for a 'yes' trade, edge = model_probability*100 -
+    price_cents (model_probability is always stored as the YES-side
+    probability, per the convention calibration.py depends on — see
+    strategy.TradeSignal's docstring); for 'no', edge = (1-model_probability)*100
+    - price_cents. 'both' (arbitrage) trades are excluded — they don't
+    carry a real probability estimate to compute an edge from at all.
+
+    Bucket boundaries are in cents: [0,5), [5,10), [10,20), [20,+inf).
+    If bigger buckets don't show meaningfully better win rates than
+    smaller ones, that's a real, checkable signal the edge estimate isn't
+    doing what it's supposed to — not a hunch, a number.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT side, price_cents, model_probability, pnl_cents FROM shadow_trades "
+            "WHERE status IN ('won','lost','sold') AND model_probability IS NOT NULL AND side != 'both'"
+        ).fetchall()
+
+    buckets = [(0, 5), (5, 10), (10, 20), (20, float("inf"))]
+    bucket_stats = {f"{lo}-{hi if hi != float('inf') else '+'}c": {"trades": 0, "wins": 0, "total_pnl": 0}
+                     for lo, hi in buckets}
+
+    for side, price_cents, model_prob, pnl_cents in rows:
+        edge = (model_prob * 100 - price_cents) if side == "yes" else ((1 - model_prob) * 100 - price_cents)
+        edge = abs(edge)
+        for lo, hi in buckets:
+            if lo <= edge < hi:
+                key = f"{lo}-{hi if hi != float('inf') else '+'}c"
+                bucket_stats[key]["trades"] += 1
+                if (pnl_cents or 0) > 0:
+                    bucket_stats[key]["wins"] += 1
+                bucket_stats[key]["total_pnl"] += (pnl_cents or 0)
+                break
+
+    result = []
+    for lo, hi in buckets:
+        key = f"{lo}-{hi if hi != float('inf') else '+'}c"
+        s = bucket_stats[key]
+        result.append({
+            "edge_bucket": key,
+            "trades": s["trades"],
+            "win_rate": (s["wins"] / s["trades"]) if s["trades"] else None,
+            "total_pnl_cents": s["total_pnl"],
+        })
+    return result
+
+
+def get_win_rate_by_confidence() -> list[dict]:
+    """
+    Same idea as get_win_rate_by_edge_bucket, for rules-extraction
+    confidence instead of edge size — does 'high' confidence actually win
+    more than 'medium'? Only trades logged after the confidence column
+    was added have a real value here; older rows show up under
+    '(unknown)' rather than being silently dropped, so the total count
+    stays honest even while the field is still filling in.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(confidence, '(unknown)') as conf, "
+            "COUNT(*) as trades, "
+            "SUM(CASE WHEN COALESCE(pnl_cents,0) > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(COALESCE(pnl_cents,0)) as total_pnl "
+            "FROM shadow_trades WHERE status IN ('won','lost','sold') "
+            "GROUP BY conf"
+        ).fetchall()
+
+    result = []
+    for conf, trades, wins, total_pnl in rows:
+        result.append({
+            "confidence": conf,
+            "trades": trades,
+            "win_rate": (wins / trades) if trades else None,
+            "total_pnl_cents": total_pnl or 0,
+        })
+    # 'high' -> 'medium' -> 'low' -> '(unknown)' is a more useful reading
+    # order than whatever GROUP BY happened to return.
+    order = {"high": 0, "medium": 1, "low": 2, "(unknown)": 3}
+    result.sort(key=lambda r: order.get(r["confidence"], 4))
+    return result
 
 
 def get_shadow_summary_by_category() -> dict[str, dict]:
