@@ -437,7 +437,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
-def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
+def evaluate_bracket_set(event_ticker: str, markets: list[dict],
+                          leg_orderbooks: Optional[dict[str, tuple[list, list]]] = None) -> None:
     """
     Called once per event (a full group of mutually-exclusive brackets —
     e.g. every temperature bucket for one city/day), separately from
@@ -448,6 +449,19 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
     markets: list of market dicts (from kalshi_client.get_markets) sharing
     this event_ticker, each expected to have 'ticker', 'yes_ask', and
     either 'no_ask' or 'yes_bid'.
+
+    leg_orderbooks (optional): {ticker: (yes_bids, no_bids)} from
+    kalshi.get_orderbook_levels, one entry per member market — fetched by
+    the caller (bot.py), since it needs a real API call per leg, unlike
+    everything else in this function. When present for EVERY included leg,
+    sizing walks each leg's own real depth simultaneously via
+    depth_sizing.find_max_bracket_size, instead of assuming the flat
+    top-of-book price holds at any size. Same reasoning as the 2-leg
+    "arbitrage" kind's find_max_arbitrage_size for why there's no slippage
+    limit here: this isn't a bet, so real profitability at real depth is
+    the only thing that should stop it from sizing up. Falls back to the
+    original flat top-of-book-price behavior when book data is missing for
+    any included leg (a fetch failure, or none passed at all).
 
     Two refinements on top of the base guaranteed-hedge idea:
       - Legs priced at/above BRACKET_NEAR_CERTAIN_SKIP_CENTS (market already
@@ -513,13 +527,61 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
     if gross_edge_per_set <= 0:
         return
 
-    # How many SETS can the bankroll afford, per the usual sizing rule —
-    # "price" of one set is total_cost, same arithmetic as any other
-    # strategy. apply_contract_cap=False: this isn't a probabilistic bet
-    # (see max_contracts_for_trade's docstring in risk_manager.py) — sizing
-    # here already comes from real per-leg mispricing, not a model
-    # estimate, so the bet-specific fixed contract ceiling doesn't belong
-    # on it, only the dollar-based bankroll cap.
+    # Quick, cheap gate on the naive top-of-book numbers first (kill
+    # switch, max open positions, price band, and the tier's normal
+    # per-unit min_edge_cents bar) — same two-stage pattern used
+    # everywhere else tonight (main bot's real path, the 2-leg "arbitrage"
+    # kind): no point fetching/walking real depth for something that
+    # wouldn't even pass this basic check on the quoted price alone.
+    # edge_already_net_of_fees=True: total_cost is a MULTI-LEG combined
+    # price (can be in the hundreds of cents), not a single contract's
+    # price — running it through the internal single-order fee estimate
+    # would produce a meaningless number. The real, correctly-computed fee
+    # check happens below (find_max_bracket_size's own search, or the
+    # flat-fallback path's explicit per-leg fee sum).
+    approved, reason = rm.approve_trade(total_cost, int(gross_edge_per_set), edge_already_net_of_fees=True)
+    if not approved:
+        return
+
+    have_depth_data = (
+        leg_orderbooks is not None and
+        all(leg_orderbooks.get(l[0]) not in (None, (None, None)) for l in included) and
+        all(leg_orderbooks[l[0]][0] is not None and leg_orderbooks[l[0]][1] is not None for l in included)
+    )
+
+    if have_depth_data:
+        leg_ask_levels = []
+        for ticker, yes_ask, no_ask, measure, station_code in included:
+            yes_bids, no_bids = leg_orderbooks[ticker]
+            # Buying NO on a leg is matched against resting YES bids
+            # (inverted to implied NO asks); buying YES against resting NO
+            # bids — same convention as depth_sizing.py's module docstring.
+            opposite_bids = yes_bids if direction == "no" else no_bids
+            leg_ask_levels.append(lib_depth.implied_ask_levels(opposite_bids))
+
+        fill = lib_depth.find_max_bracket_size(leg_ask_levels, fees.taker_fee_cents,
+                                                min_net_edge_cents=rm.preset.min_edge_cents)
+        if fill is None:
+            storage.log_decision(event_ticker, direction, total_cost, 1.0, 0, "skipped",
+                                  f"no set size clears net-of-fee edge at real order book depth "
+                                  f"({skipped_count} leg(s) skipped as near-certain)", "shadow")
+            return
+
+        sets = fill.contracts_fillable
+        # Recompute each leg's OWN realized price at the chosen size for
+        # individual per-leg logging — find_max_bracket_size only returns
+        # the combined aggregate. Cheap: re-walking already-fetched levels
+        # in memory, no extra API calls.
+        for (ticker, yes_ask, no_ask, measure, station_code), levels in zip(included, leg_ask_levels):
+            leg_fill = lib_depth.estimate_fill(levels, sets)
+            realized_price = round(leg_fill.avg_price_cents)
+            storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, realized_price,
+                                      station_code=station_code, measure=measure)
+        rm.record_fill(cost_cents=fill.total_cost_cents)
+        return
+
+    # ---- Fallback: no book data available this cycle — original flat
+    # top-of-book behavior, unchanged from before depth-awareness. ----
     sets = rm.max_contracts_for_trade(total_cost, apply_contract_cap=False)
     if sets < 1:
         return
@@ -535,10 +597,6 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
                               "skipped", f"worst-case edge {gross_edge_per_set}c doesn't clear "
                               f"fee-adjusted minimum after {total_fee_cents}c total fees "
                               f"({skipped_count} leg(s) skipped as near-certain)", "shadow")
-        return
-
-    approved, reason = rm.approve_trade(total_cost, int(net_edge_per_set), edge_already_net_of_fees=True)
-    if not approved:
         return
 
     for ticker, yes_ask, no_ask, measure, station_code in included:
