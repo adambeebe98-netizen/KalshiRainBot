@@ -359,7 +359,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                         pairs, realized_price = 1, candidate.price_cents
 
                     storage.log_shadow_trade(name, ticker, "both", pairs, realized_price,
-                                              model_probability=None, station_code=station_code, measure=measure)
+                                              model_probability=None, station_code=station_code, measure=measure,
+                                              rationale=candidate.rationale)
                     rm.record_fill(cost_cents=pairs * realized_price)
             continue
 
@@ -474,7 +475,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         exit_target = (realized_price + cfg["exit_offset"]) if kind == "swing" else None
         storage.log_shadow_trade(name, ticker, candidate.side, contracts, realized_price,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
-                                  exit_target_cents=exit_target)
+                                  exit_target_cents=exit_target, rationale=candidate.rationale)
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
@@ -624,7 +625,10 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict],
             leg_fill = lib_depth.estimate_fill(levels, sets)
             realized_price = round(leg_fill.avg_price_cents)
             storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, realized_price,
-                                      station_code=station_code, measure=measure)
+                                      station_code=station_code, measure=measure,
+                                      rationale=f"bracket set of {len(included)} legs (of {len(included) + skipped_count} "
+                                                f"total, {skipped_count} skipped as near-certain), depth-walked, "
+                                                f"worst-case payout {worst_case_payout}c/set")
         rm.record_fill(cost_cents=fill.total_cost_cents)
         return
 
@@ -650,7 +654,10 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict],
     for ticker, yes_ask, no_ask, measure, station_code in included:
         price = no_ask if direction == "no" else yes_ask
         storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, price,
-                                  station_code=station_code, measure=measure)
+                                  station_code=station_code, measure=measure,
+                                  rationale=f"bracket set of {len(included)} legs (of {len(included) + skipped_count} "
+                                            f"total, {skipped_count} skipped as near-certain), flat top-of-book "
+                                            f"pricing (no depth data this cycle), worst-case payout {worst_case_payout}c/set")
     rm.record_fill(cost_cents=total_cost * sets)
 
 
