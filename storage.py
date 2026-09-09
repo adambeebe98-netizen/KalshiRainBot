@@ -474,6 +474,35 @@ def load_last_shadow_bankroll(strategy: str, default_cents: int) -> int:
         return row[0] if row else default_cents
 
 
+def get_recent_strategy_performance(strategy: str, lookback: int = 20) -> dict:
+    """
+    Rolling-window performance for a strategy's last `lookback` SETTLED
+    trades (most recent first) — the data source for the automatic
+    performance-dampening mechanism in shadow.py. Purely a summary of
+    what already happened; computing what to DO about it is a separate,
+    deliberately pure function so the decision logic stays testable
+    without a database.
+
+    Returns {"trades": int, "total_pnl_cents": int, "total_cost_cents": int,
+    "roi_pct": float | None} — roi_pct is None when total_cost_cents is 0
+    (shouldn't happen for a real trade, but avoids a division error if it
+    somehow did).
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT pnl_cents, price_cents, count FROM shadow_trades "
+            "WHERE strategy=? AND status IN ('won','lost','sold') "
+            "ORDER BY settled_ts DESC LIMIT ?",
+            (strategy, lookback),
+        ).fetchall()
+    trades = len(rows)
+    total_pnl = sum((r[0] or 0) for r in rows)
+    total_cost = sum(r[1] * r[2] for r in rows)
+    roi_pct = (total_pnl / total_cost * 100) if total_cost else None
+    return {"trades": trades, "total_pnl_cents": total_pnl,
+            "total_cost_cents": total_cost, "roi_pct": roi_pct}
+
+
 def get_shadow_bankroll_history(strategy: str, limit: int = 300) -> list[tuple[int, int]]:
     """Returns [(ts, bankroll_cents), ...] oldest-first, for charting."""
     with get_conn() as conn:
