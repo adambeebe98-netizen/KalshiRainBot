@@ -510,7 +510,13 @@ def main():
     # Resume from last known bankroll rather than resetting on every restart —
     # a crash or reboot shouldn't erase the bot's memory of real P&L.
     resumed_bankroll = storage.load_last_bankroll(SETTINGS.starting_bankroll_cents)
-    risk = RiskManager(RiskState(bankroll_cents=resumed_bankroll, day=date.today()))
+    # Same reasoning for today's realized P&L — see
+    # storage.get_todays_realized_pnl_cents()'s docstring: without this,
+    # every restart silently resets the daily kill switch back to
+    # "fresh," regardless of what already happened earlier today.
+    resumed_pnl_today = storage.get_todays_realized_pnl_cents_main()
+    risk = RiskManager(RiskState(bankroll_cents=resumed_bankroll, day=date.today(),
+                                  realized_pnl_today_cents=resumed_pnl_today))
 
     kalshi = None
     if live:
