@@ -38,6 +38,7 @@ import strategies_lib as lib
 import categories
 import fees
 import storage
+import depth_sizing as lib_depth
 
 # Position-size scaling for temp_calibrated_confidence_weighted, keyed by
 # rules_extractor's MarketRules.confidence. "low" never actually reaches
@@ -219,14 +220,27 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                       no_ask: Optional[int], station_code: Optional[str], measure: Optional[str],
                       confidence: Optional[str] = None,
                       current_forecast_temp_f: Optional[float] = None,
-                      previous_forecast_temp_f: Optional[float] = None) -> None:
+                      previous_forecast_temp_f: Optional[float] = None,
+                      yes_bids: Optional[list[tuple[int, int]]] = None,
+                      no_bids: Optional[list[tuple[int, int]]] = None) -> None:
     """Called once per scanned market per cycle. Every strategy independently
     decides whether IT would trade this market — never a real order.
 
     confidence/current_forecast_temp_f/previous_forecast_temp_f are optional
     and only used by temp_calibrated_confidence_weighted and
     temp_forecast_momentum respectively — every other strategy ignores them,
-    so existing callers that don't pass them keep working unchanged."""
+    so existing callers that don't pass them keep working unchanged.
+
+    yes_bids/no_bids (from kalshi.get_orderbook_levels, fetched ONCE per
+    ticker by the caller and shared across every strategy here — see
+    bot.py) enable REAL depth-aware sizing via depth_sizing.py, same
+    mechanism the main bot's actual trade path already uses: the quoted
+    top-of-book price only holds for the first few contracts, so a paper
+    trade sized off that price alone overstates how good a fill you'd
+    really get, especially for anything beyond a token position. When
+    omitted (a caller that hasn't fetched them, or a fetch that failed this
+    cycle), every strategy falls back to the flat top-of-book assumption
+    exactly as before — this is additive, never a hard requirement."""
     engines = get_engines()
 
     for name, cfg in ACTIVE_STRATEGIES.items():
@@ -353,11 +367,39 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             if contracts < 1:
                 continue
 
-        exit_target = (candidate.price_cents + cfg["exit_offset"]) if kind == "swing" else None
-        storage.log_shadow_trade(name, ticker, candidate.side, contracts, candidate.price_cents,
+        # Real depth-aware sizing/pricing when the caller fetched the order
+        # book this cycle (see the docstring above and depth_sizing.py) —
+        # `contracts` above becomes the CEILING this can size up to, not
+        # the final answer. Falls back to the flat top-of-book price/count
+        # already computed above when book data isn't available.
+        realized_price = candidate.price_cents
+        if yes_bids is not None and no_bids is not None:
+            opposite_bids = no_bids if candidate.side == "yes" else yes_bids
+            ask_levels = lib_depth.implied_ask_levels(opposite_bids)
+
+            if model_prob is not None:
+                fill = lib_depth.find_max_profitable_size(
+                    ask_levels, fees.taker_fee_cents, model_prob,
+                    max_contracts_cap=contracts, min_net_edge_cents=rm.preset.min_edge_cents,
+                )
+                if fill is None:
+                    continue
+            else:
+                # favorites/always_trade don't carry a real probability
+                # estimate to check profitability against (see their
+                # branches above) — just cap size to what the book can
+                # actually support, no profit search.
+                fill = lib_depth.estimate_fill(ask_levels, contracts)
+                if fill.contracts_fillable < 1:
+                    continue
+            contracts = fill.contracts_fillable
+            realized_price = round(fill.avg_price_cents)
+
+        exit_target = (realized_price + cfg["exit_offset"]) if kind == "swing" else None
+        storage.log_shadow_trade(name, ticker, candidate.side, contracts, realized_price,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
                                   exit_target_cents=exit_target)
-        rm.record_fill(cost_cents=contracts * candidate.price_cents)
+        rm.record_fill(cost_cents=contracts * realized_price)
 
 
 def evaluate_bracket_set(event_ticker: str, markets: list[dict]) -> None:
