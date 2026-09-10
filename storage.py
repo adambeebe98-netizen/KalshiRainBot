@@ -434,7 +434,7 @@ def get_trades_for_retrospective(hours: int = 168, limit: int = 250) -> list[dic
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT strategy, ticker, side, count, price_cents, status, pnl_cents, "
-            "model_probability, station_code, measure, rationale, settled_ts "
+            "model_probability, station_code, measure, rationale, confidence, settled_ts "
             "FROM shadow_trades WHERE status IN ('won','lost','sold') AND settled_ts >= ? "
             "ORDER BY settled_ts DESC LIMIT ?",
             (cutoff, limit),
