@@ -51,8 +51,18 @@ def estimate_precip_probability(
     observation: Optional[StationObservation],
     forecast: list[PrecipForecast],
     trace_counts_as_zero: Optional[bool],
-) -> tuple[float, str]:
-    """Returns (probability measurable precip occurs, human-readable rationale)."""
+) -> tuple[float, str, bool]:
+    """Returns (probability measurable precip occurs, human-readable rationale,
+    has_real_signal). has_real_signal=False means the 0.5 returned is a
+    genuine "no basis to estimate at all" placeholder, not a real belief
+    the outcome is a coin flip — the caller MUST NOT compute a normal edge
+    from it (see evaluate_market's use of this flag, and the bug this
+    fixes: comparing a meaningless 0.5 placeholder against a real market
+    price like 2c produces what LOOKS like a huge, confident edge, when
+    it's actually zero real information dressed up as a strong signal —
+    confirmed live: KXHIGHNY-26SEP10-B91.5 traded on exactly this pattern,
+    "no forecast temperature available" yet a nominal ~48c "edge" against
+    a 2c market)."""
     notes = []
 
     # Already-observed precipitation this hour/3hr strongly predicts a "yes"
@@ -68,7 +78,7 @@ def estimate_precip_probability(
             notes.append("no measurable precip at station yet this window")
 
     if already_measurable:
-        return 0.97, "; ".join(notes)
+        return 0.97, "; ".join(notes), True
 
     # Otherwise, fall back to the forecast POP for the remaining periods
     # today, taking the max across remaining daytime/night periods since
@@ -83,10 +93,10 @@ def estimate_precip_probability(
         # POP is not literally "probability of >0 inches at this exact station,"
         # it's probability of measurable precip somewhere in the forecast area —
         # treat it as a noisy proxy, not ground truth, hence no further inflation.
-        return max_pop, "; ".join(notes)
+        return max_pop, "; ".join(notes), True
 
     notes.append("no observation or forecast data available")
-    return 0.5, "; ".join(notes)  # genuine uncertainty — will almost never clear min edge
+    return 0.5, "; ".join(notes), False  # genuine "no basis at all" -- caller must zero the edge, not compute one
 
 
 def market_implied_probability(yes_price_cents: int) -> float:
@@ -116,13 +126,24 @@ def estimate_temperature_probability(
     forecast_temp_f: Optional[float],
     threshold_low_f: Optional[float],
     threshold_high_f: Optional[float],
-) -> tuple[float, str]:
+) -> tuple[float, str, bool]:
     """
     Returns (probability the actual reading falls within
-    [threshold_low_f, threshold_high_f], rationale). Either threshold bound
-    can be None for an open-ended market (e.g. 'above 85F' has no upper
-    bound); both None means rules_extractor couldn't parse a usable
-    threshold, which returns genuine 0.5 uncertainty rather than guessing.
+    [threshold_low_f, threshold_high_f], rationale, has_real_signal).
+    Either threshold bound can be None for an open-ended market (e.g.
+    'above 85F' has no upper bound); both None means rules_extractor
+    couldn't parse a usable threshold.
+
+    has_real_signal=False means the 0.5 returned is a genuine "no basis
+    to estimate at all" placeholder (no forecast temperature, or no
+    usable threshold), NOT a real belief the outcome is a coin flip — the
+    caller MUST NOT compute a normal edge from it. Confirmed live: this
+    fallback compared against a real, far-out-of-the-money market price
+    (2c) produced what looked like a confident ~48c edge, when it was
+    actually zero real information. The market price being far from 50c
+    is exactly the common case for temperature bucket markets, not an
+    edge case — the old assumption that this "would almost never clear
+    min edge" didn't hold.
     """
     notes = []
     if observed_temp_f is not None:
@@ -130,11 +151,11 @@ def estimate_temperature_probability(
 
     if forecast_temp_f is None:
         notes.append("no forecast temperature available for the relevant period")
-        return 0.5, "; ".join(notes)
+        return 0.5, "; ".join(notes), False
 
     if threshold_low_f is None and threshold_high_f is None:
         notes.append("no usable threshold parsed from rules text")
-        return 0.5, "; ".join(notes)
+        return 0.5, "; ".join(notes), False
 
     notes.append(f"forecast temp {forecast_temp_f:.0f}F vs threshold "
                  f"[{threshold_low_f if threshold_low_f is not None else '-inf'}, "
@@ -154,7 +175,7 @@ def estimate_temperature_probability(
         prob = dist.cdf(threshold_high_f + 0.5)
 
     prob = max(0.01, min(0.99, prob))
-    return prob, "; ".join(notes)
+    return prob, "; ".join(notes), True
 
 
 def pick_relevant_forecast_temp_f(measure: str, forecast: list[PrecipForecast]) -> Optional[float]:
@@ -181,9 +202,29 @@ def evaluate_temperature_market(
     forecast_temp_f = pick_relevant_forecast_temp_f(rules.measure, forecast)
     observed_temp_f = observation.temperature_f if observation else None
 
-    raw_model_p, rationale = estimate_temperature_probability(
+    raw_model_p, rationale, has_real_signal = estimate_temperature_probability(
         observed_temp_f, forecast_temp_f, rules.threshold_low_f, rules.threshold_high_f
     )
+
+    if not has_real_signal:
+        # No forecast temperature, or no usable threshold — 0.5 here is a
+        # placeholder meaning "no basis to estimate at all," not a real
+        # belief in a coin flip. Applying calibration to it would just
+        # relabel a meaningless number as if it were calibrated, and
+        # computing an edge against it is the actual bug this fixes: a far
+        # out-of-the-money market price compared to an uninformative 0.5
+        # produces what looks like a large, confident edge that is really
+        # zero real information. Forcing edge_cents=0 unconditionally
+        # guarantees no strategy's min_edge_cents gate can ever treat this
+        # as tradeable, regardless of which specific market price it's
+        # compared against.
+        return TradeSignal(
+            ticker=ticker, side="yes", model_probability=0.5, model_probability_yes=0.5,
+            market_implied_probability=market_implied_probability(yes_price_cents),
+            edge_cents=0,
+            rationale=f"{rationale}; no real signal, edge forced to 0 "
+                      f"[rules confidence: {rules.confidence}, source: {rules.settlement_source}]",
+        )
 
     model_p, calibration_note = calibration.apply_calibration(
         raw_model_p, rules.station_code, rules.measure
@@ -224,9 +265,20 @@ def evaluate_market(
     observation: Optional[StationObservation],
     forecast: list[PrecipForecast],
 ) -> TradeSignal:
-    raw_model_p, rationale = estimate_precip_probability(
+    raw_model_p, rationale, has_real_signal = estimate_precip_probability(
         observation, forecast, rules.trace_counts_as_zero
     )
+
+    if not has_real_signal:
+        # Same fix as evaluate_temperature_market — see its comment for
+        # the full reasoning and the confirmed live example of this bug.
+        return TradeSignal(
+            ticker=ticker, side="yes", model_probability=0.5, model_probability_yes=0.5,
+            market_implied_probability=market_implied_probability(yes_price_cents),
+            edge_cents=0,
+            rationale=f"{rationale}; no real signal, edge forced to 0 "
+                      f"[rules confidence: {rules.confidence}, source: {rules.settlement_source}]",
+        )
 
     # Apply the learned per-station calibration bias (see calibration.py).
     # Early on, before enough settled trades exist, this is a no-op.
