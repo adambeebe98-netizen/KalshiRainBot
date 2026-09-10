@@ -273,8 +273,13 @@ def get_engines() -> dict[str, RiskManager]:
             # get_todays_realized_pnl_cents()'s docstring for why this
             # matters for the daily kill switch surviving a restart.
             realized_today = storage.get_todays_realized_pnl_cents(name)
+            # Same reasoning, same bug class, for the open-position count —
+            # see get_open_shadow_position_count()'s docstring for the
+            # confirmed, severe consequences of NOT doing this.
+            open_count = storage.get_open_shadow_position_count(name)
             state = RiskState(bankroll_cents=bankroll, day=date.today(),
-                               realized_pnl_today_cents=realized_today)
+                               realized_pnl_today_cents=realized_today,
+                               open_positions_count=open_count)
             _engines[name] = RiskManager(state, _build_preset(cfg))
     return _engines
 
