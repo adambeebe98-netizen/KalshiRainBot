@@ -528,8 +528,13 @@ def main():
     # every restart silently resets the daily kill switch back to
     # "fresh," regardless of what already happened earlier today.
     resumed_pnl_today = storage.get_todays_realized_pnl_cents_main()
+    # Same bug class again, for open position count — see
+    # storage.get_open_shadow_position_count()'s docstring for the
+    # confirmed, severe consequences of not seeding this from real data.
+    resumed_open_count = storage.get_open_position_count_main()
     risk = RiskManager(RiskState(bankroll_cents=resumed_bankroll, day=date.today(),
-                                  realized_pnl_today_cents=resumed_pnl_today))
+                                  realized_pnl_today_cents=resumed_pnl_today,
+                                  open_positions_count=resumed_open_count))
 
     kalshi = None
     if live:
