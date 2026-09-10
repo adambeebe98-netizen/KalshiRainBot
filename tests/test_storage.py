@@ -30,6 +30,73 @@ def _clear(*tables):
         conn.commit()
 
 
+class TestOpenPositionsDetail(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades", "price_history")
+
+    def test_returns_full_per_trade_detail_including_rationale_and_confidence(self):
+        storage.log_shadow_trade("calibrated_balanced", "T1", "no", 10, 60,
+                                   model_probability=0.35, confidence="high",
+                                   rationale="station already recorded rain")
+        storage.log_price_snapshot("T1", yes_ask=25, yes_bid=None)
+
+        positions = storage.get_open_positions_detail()
+        self.assertEqual(len(positions), 1)
+        p = positions[0]
+        self.assertEqual(p["current_price_cents"], 75)  # 100 - 25
+        self.assertEqual(p["current_value_cents"], 750)
+        self.assertEqual(p["unrealized_pnl_cents"], 150)
+        self.assertEqual(p["rationale"], "station already recorded rain")
+        self.assertEqual(p["confidence"], "high")
+
+    def test_includes_exit_target_when_set(self):
+        storage.log_shadow_trade("swing", "T2", "yes", 5, 45, exit_target_cents=65,
+                                   rationale="entering on a dip")
+        positions = storage.get_open_positions_detail()
+        self.assertEqual(positions[0]["exit_target_cents"], 65)
+
+    def test_excludes_settled_trades(self):
+        tid = storage.log_shadow_trade("swing", "T3", "yes", 5, 45)
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=100)
+        positions = storage.get_open_positions_detail()
+        self.assertEqual(len(positions), 0)
+
+    def test_orders_most_recently_opened_first(self):
+        storage.log_shadow_trade("calibrated_balanced", "OLDEST", "yes", 5, 20)
+        storage.log_shadow_trade("swing", "MIDDLE", "yes", 5, 20)
+        storage.log_shadow_trade("longshot", "NEWEST", "yes", 5, 20)
+        positions = storage.get_open_positions_detail()
+        self.assertEqual(positions[0]["ticker"], "NEWEST")
+        self.assertEqual(positions[-1]["ticker"], "OLDEST")
+
+    def test_both_side_position_marks_to_locked_in_100c(self):
+        storage.log_shadow_trade("arbitrage", "T4", "both", 5, 90)
+        positions = storage.get_open_positions_detail()
+        self.assertEqual(positions[0]["current_price_cents"], 100)
+
+
+class TestOpenPositionsDetail_RefactorConsistency(unittest.TestCase):
+    """Confirms the shared _current_mark_for_position() helper keeps the
+    per-strategy aggregate and the per-trade detail view from ever
+    disagreeing on what "current value" means for the same position."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades", "shadow_bankroll_snapshots", "price_history")
+
+    def test_aggregate_and_detail_agree_on_the_same_position(self):
+        storage.log_price_snapshot("T1", yes_ask=None, yes_bid=55)
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+
+        summary_row = next(s for s in storage.get_shadow_summary() if s["strategy"] == "swing")
+        detail_row = storage.get_open_positions_detail()[0]
+
+        self.assertEqual(summary_row["current_value_cents"], detail_row["current_value_cents"])
+        self.assertEqual(summary_row["unrealized_pnl_cents"], detail_row["unrealized_pnl_cents"])
+
+
 class TestMarkToMarket(unittest.TestCase):
     def setUp(self):
         storage.init_db()
