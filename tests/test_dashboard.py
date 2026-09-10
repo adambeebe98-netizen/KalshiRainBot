@@ -93,6 +93,16 @@ class TestOpenPositionsView(DashboardTestCase):
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("0 open", body)
 
+    def test_badge_shows_the_real_total_even_beyond_the_display_limit(self):
+        """THE regression: the badge used to show len(get_open_positions_detail()),
+        which silently truncates at 300 -- a real total of 350 would have
+        displayed as exactly 300, hiding the true number."""
+        for i in range(305):
+            storage.log_shadow_trade("calibrated_balanced", f"T{i}", "yes", 5, 40)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("305 open", body)
+        self.assertIn("Showing the most recent", body)
+
 
 class TestSuggestionActions(DashboardTestCase):
     def test_apply_calls_set_override_and_clears_the_suggestion(self):
