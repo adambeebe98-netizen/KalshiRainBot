@@ -335,9 +335,9 @@ DASHBOARD_PAGE = """
 <section class="hero">
   <div class="hero-head">
     <h1>Open positions</h1>
-    <span class="count-badge">{{ open_positions|length }} open</span>
+    <span class="count-badge">{{ open_positions_total }} open</span>
   </div>
-  <p class="subtext">What the bot is holding right now, marked to its current price, with the reasoning behind each one.</p>
+  <p class="subtext">What the bot is holding right now, marked to its current price, with the reasoning behind each one.{% if open_positions_total > open_positions|length %} Showing the most recent {{ open_positions|length }} of {{ open_positions_total }}.{% endif %}</p>
   <div class="position-list">
     {% for p in open_positions %}
     <article class="position-card">
@@ -719,6 +719,7 @@ def dashboard():
     edge_buckets = []
     confidence_breakdown = []
     open_positions = []
+    open_positions_total = 0
     try:
         shadow_summary = storage.get_shadow_summary()
         for s in shadow_summary:
@@ -750,6 +751,7 @@ def dashboard():
         edge_buckets = storage.get_win_rate_by_edge_bucket()
         confidence_breakdown = storage.get_win_rate_by_confidence()
         open_positions = storage.get_open_positions_detail()
+        open_positions_total = storage.get_open_shadow_position_total_count()
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -773,6 +775,7 @@ def dashboard():
         edge_buckets=edge_buckets,
         confidence_breakdown=confidence_breakdown,
         open_positions=open_positions,
+        open_positions_total=open_positions_total,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
