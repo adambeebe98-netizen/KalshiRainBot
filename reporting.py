@@ -95,6 +95,20 @@ def build_export_text(env: dict | None = None) -> str:
         lines.append(f"(calibration unavailable: {e})")
     lines.append("")
 
+    lines.append("--- DOES CONFIDENCE/EDGE PREDICT OUTCOMES? (quantitative, not LLM-based) ---")
+    try:
+        for b in storage.get_win_rate_by_edge_bucket():
+            wr = f"{b['win_rate']*100:.0f}%" if b["win_rate"] is not None else "n/a"
+            lines.append(f"edge {b['edge_bucket']:<8} settled={b['trades']:<4} win_rate={wr:<6} "
+                         f"total_pnl=${(b['total_pnl_cents'] or 0)/100:.2f}")
+        for c in storage.get_win_rate_by_confidence():
+            wr = f"{c['win_rate']*100:.0f}%" if c["win_rate"] is not None else "n/a"
+            lines.append(f"confidence={c['confidence']:<10} settled={c['trades']:<4} win_rate={wr:<6} "
+                         f"total_pnl=${(c['total_pnl_cents'] or 0)/100:.2f}")
+    except Exception as e:
+        lines.append(f"(confidence/edge analytics unavailable: {e})")
+    lines.append("")
+
     lines.append("--- LAST 30 REAL TRADES (the active bot) ---")
     try:
         with storage.get_conn() as conn:
