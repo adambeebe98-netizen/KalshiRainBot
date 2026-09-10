@@ -596,6 +596,12 @@ def main():
                     log.warning(f"Retrospective run failed (non-fatal, trading continues): {e}")
 
             consecutive_failures = 0
+            # Heartbeat: the dashboard uses this to show "last scan Xm ago"
+            # and flag it red if the bot has gone quiet — a crash-looped or
+            # silently-stalled process wouldn't reach this line, so its
+            # absence (or staleness) is a genuine, catchable signal rather
+            # than just trusting the systemd status.
+            storage.set_meta("last_scan_completed_ts", str(int(time.time())))
         except Exception as e:
             # One bad cycle (API hiccup, network blip, a market with malformed
             # data) should never take the whole bot down. Log it, back off,
