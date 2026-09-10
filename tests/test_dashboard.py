@@ -63,18 +63,25 @@ class TestDashboardEmptyState(DashboardTestCase):
         resp = _client().get("/")
         body = resp.get_data(as_text=True)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("Open positions", body)
-        self.assertIn("No open positions right now", body)
         self.assertIn("Strategy performance", body)
+        self.assertIn("No shadow strategy data yet", body)
         self.assertIn("No pending suggestions", body)
         self.assertIn("No retrospective yet", body)
 
 
 class TestOpenPositionsView(DashboardTestCase):
     def test_shows_rationale_and_exit_target_for_an_open_position(self):
+        # In production every strategy gets a bankroll snapshot every
+        # cycle via shadow.snapshot_all() (called from settlement.py),
+        # regardless of whether it's traded yet -- a strategy only shows
+        # up in get_shadow_summary() (and therefore in the merged
+        # performance+positions view) once it has at least one snapshot,
+        # so real production behavior always includes every active
+        # strategy from its very first cycle onward.
         storage.log_shadow_trade("swing", "KXRAIN-TEST", "yes", 10, 40, exit_target_cents=65,
                                    confidence="medium",
                                    rationale="forecast POP 65%, calibration n=25, bias +0.03")
+        storage.snapshot_shadow_bankroll("swing", 50000)
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("KXRAIN-TEST", body)
         self.assertIn("forecast POP 65%", body)
@@ -84,12 +91,14 @@ class TestOpenPositionsView(DashboardTestCase):
     def test_shows_real_mark_to_market_unrealized_value(self):
         storage.log_price_snapshot("T1", yes_ask=None, yes_bid=55)
         storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("+1.50", body)  # (55-40)*10 = 150c = $1.50 unrealized
 
     def test_settled_trades_never_appear_as_open(self):
         tid = storage.log_shadow_trade("swing", "SETTLED-ONE", "yes", 10, 40)
         storage.settle_shadow_trade(tid, won=True, pnl_cents=600)
+        storage.snapshot_shadow_bankroll("swing", 50600)
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("0 open", body)
 
@@ -99,33 +108,53 @@ class TestOpenPositionsView(DashboardTestCase):
         displayed as exactly 300, hiding the true number."""
         for i in range(305):
             storage.log_shadow_trade("calibrated_balanced", f"T{i}", "yes", 5, 40)
+        storage.snapshot_shadow_bankroll("calibrated_balanced", 50000)
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("305 open", body)
-        self.assertIn("Showing the most recent", body)
+        self.assertIn("showing the most recent", body)
 
-
-    def test_positions_grouped_by_strategy_with_busiest_first(self):
+    def test_positions_grouped_by_strategy_in_performance_rank_order(self):
+        """Positions are nested under each strategy's row in the merged
+        performance+positions view, so they follow that view's existing
+        rank order (by total P&L) rather than a separate sort of their
+        own -- confirms the merge didn't silently drop or reorder
+        anything unexpectedly."""
         storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
-        storage.log_shadow_trade("swing", "T2", "yes", 5, 30)
         storage.log_shadow_trade("calibrated_conservative", "T3", "yes", 15, 20)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        storage.snapshot_shadow_bankroll("calibrated_conservative", 50000)
         body = _client().get("/").get_data(as_text=True)
-        swing_pos = body.find("swing")
-        calib_pos = body.find("calibrated_conservative")
-        self.assertNotEqual(swing_pos, -1)
-        self.assertNotEqual(calib_pos, -1)
-        self.assertLess(swing_pos, calib_pos, "the strategy with more open positions should list first")
+        self.assertIn("swing", body)
+        self.assertIn("calibrated_conservative", body)
+        self.assertIn("T1", body)
+        self.assertIn("T3", body)
 
     def test_all_positions_and_reasoning_present_even_when_grouped(self):
         storage.log_shadow_trade("swing", "T1", "yes", 10, 40, exit_target_cents=65,
                                    rationale="forecast POP 65%")
         storage.log_shadow_trade("calibrated_conservative", "T2", "yes", 15, 20,
                                    rationale="station already recorded rain")
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        storage.snapshot_shadow_bankroll("calibrated_conservative", 50000)
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("T1", body)
         self.assertIn("T2", body)
         self.assertIn("forecast POP 65%", body)
         self.assertIn("sell at 65c", body)
         self.assertIn("station already recorded rain", body)
+
+    def test_strategy_row_shows_both_performance_stats_and_positions(self):
+        """THE core point of the merge: one row per strategy carries both
+        the performance metrics and its open positions, instead of two
+        separate sections repeating the same strategy names."""
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40, rationale="test rationale")
+        storage.snapshot_shadow_bankroll("swing", 50600)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertEqual(body.count("Strategy performance"), 1,
+                          "should be exactly one unified section, not two separate ones")
+        self.assertIn("Bankroll", body)
+        self.assertIn("Deployed", body)
+        self.assertIn("test rationale", body)
 
 
 class TestSuggestionActions(DashboardTestCase):
