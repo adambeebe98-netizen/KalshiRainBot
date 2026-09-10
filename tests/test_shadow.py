@@ -303,5 +303,34 @@ class TestPerformanceDampeningIntegration(unittest.TestCase):
         self.assertGreaterEqual(row[0], 1)
 
 
+class TestOpenPositionCountSurvivesRestart(unittest.TestCase):
+    """The real, confirmed production bug: get_engines() never seeded
+    open_positions_count from real data, so max_open_positions never
+    meaningfully bound on a bot restarted as often as this one has been —
+    confirmed directly against production data showing 350-440+ "Active"
+    positions per strategy, far beyond any reasonable cap."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_a_strategy_with_many_real_open_positions_correctly_blocks_new_ones_after_restart(self):
+        for i in range(50):
+            storage.log_shadow_trade("calibrated_conservative", f"POS{i}", "yes", 10, 40)
+
+        # Simulate a fresh process restart.
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+        rm = shadow.get_engines()["calibrated_conservative"]
+        self.assertEqual(rm.state.open_positions_count, 50)
+        approved, reason = rm.approve_trade(40, 30)
+        self.assertFalse(approved)
+        self.assertIn("max open positions", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
