@@ -35,6 +35,23 @@ class TestOpenPositionsDetail(unittest.TestCase):
         storage.init_db()
         _clear("shadow_trades", "price_history")
 
+    def test_total_count_is_accurate_beyond_the_detail_list_limit(self):
+        """THE regression: the dashboard badge used to show the LENGTH of
+        get_open_positions_detail()'s (necessarily capped, for page
+        weight) list, which silently truncates at 300 -- meaning a real
+        total above 300 would display as exactly 300, hiding the true
+        number entirely."""
+        for i in range(350):
+            storage.log_shadow_trade("calibrated_balanced", f"T{i}", "yes", 5, 40)
+        self.assertEqual(storage.get_open_shadow_position_total_count(), 350)
+        self.assertEqual(len(storage.get_open_positions_detail()), 300)
+
+    def test_total_count_matches_detail_length_when_under_the_limit(self):
+        for i in range(5):
+            storage.log_shadow_trade("swing", f"T{i}", "yes", 5, 40)
+        self.assertEqual(storage.get_open_shadow_position_total_count(),
+                          len(storage.get_open_positions_detail()))
+
     def test_returns_full_per_trade_detail_including_rationale_and_confidence(self):
         storage.log_shadow_trade("calibrated_balanced", "T1", "no", 10, 60,
                                    model_probability=0.35, confidence="high",
