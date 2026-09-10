@@ -68,6 +68,35 @@ class TestKillSwitch(unittest.TestCase):
         self.assertEqual(state.realized_pnl_today_cents, -4800, "must NOT reset mid-day")
 
 
+class TestOpenPositionCountPersistence(unittest.TestCase):
+    """Same bug class as TestKillSwitch's restart-survival tests, for
+    open_positions_count instead of realized_pnl_today_cents — confirmed
+    directly against production data: strategies showing 350-440+ "Active"
+    positions on the dashboard, far beyond any reasonable per-strategy
+    cap, because this counter reset to 0 on every restart regardless of
+    how many real open positions already existed."""
+
+    def test_max_open_positions_binds_correctly_when_seeded_from_real_count(self):
+        state = RiskState(bankroll_cents=50000, day=date.today(), open_positions_count=15)
+        rm = RiskManager(state, make_preset(max_open_positions=15))
+        approved, reason = rm.approve_trade(price_cents=40, edge_cents=30)
+        self.assertFalse(approved)
+        self.assertIn("max open positions", reason)
+
+    def test_the_bug_demonstrated_directly(self):
+        """Without seeding, a restart forgets every real open position —
+        this is exactly what get_engines() used to do before the fix."""
+        unseeded_state = RiskState(bankroll_cents=50000, day=date.today())  # old behavior
+        self.assertEqual(unseeded_state.open_positions_count, 0,
+                          "this IS the bug: defaults to 0 regardless of real open positions")
+
+    def test_below_the_cap_still_approves_normally(self):
+        state = RiskState(bankroll_cents=50000, day=date.today(), open_positions_count=5)
+        rm = RiskManager(state, make_preset(max_open_positions=15))
+        approved, reason = rm.approve_trade(price_cents=40, edge_cents=30)
+        self.assertTrue(approved)
+
+
 class TestContractCapVsDollarCap(unittest.TestCase):
     def test_fixed_contract_cap_binds_regardless_of_a_large_bankroll(self):
         """THE other regression: bankroll*pct/price grows unboundedly with a
