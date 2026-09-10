@@ -556,20 +556,43 @@ def get_shadow_bankroll_history(strategy: str, limit: int = 300) -> list[tuple[i
         return list(reversed(rows))
 
 
-def _mark_open_positions_to_market(conn, strategy: str) -> tuple[int, int]:
+def _current_mark_for_position(conn, ticker: str, side: str, price_cents: int) -> int:
     """
-    Current mark-to-market value of every OPEN position for this strategy,
-    using the same convention check_swing_exits()/check_bracket_arbitrage_offload()
+    Per-CONTRACT mark-to-market price for one open position, using the
+    same convention check_swing_exits()/check_bracket_arbitrage_offload()
     already use to value a held position: a YES holding is worth its
     current yes_bid (what you could sell it for right now), a NO holding
     is worth (100 - current yes_ask). A 'both' (2-leg arbitrage) position
-    is a locked-in 100c/contract regardless of price movement — dutch-book
+    is a locked-in 100c regardless of price movement — dutch-book
     arbitrage doesn't fluctuate the way a directional position does, it's
     already guaranteed at entry.
 
-    Falls back to cost basis (assumes no unrealized gain/loss) for a
-    ticker with no recent price_history snapshot, rather than guessing at
-    a number with no real data behind it.
+    Falls back to the entry price_cents (assumes no unrealized gain/loss)
+    when there's no recent price_history snapshot, rather than guessing at
+    a number with no real data behind it. Shared by both the per-strategy
+    aggregate (_mark_open_positions_to_market) and the per-trade detail
+    view (get_open_positions_detail) so the two can never drift apart on
+    what "current value" means.
+    """
+    if side == "both":
+        return 100
+    latest = conn.execute(
+        "SELECT yes_ask, yes_bid FROM price_history WHERE ticker=? ORDER BY ts DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if latest is not None:
+        yes_ask, yes_bid = latest
+        mark = yes_bid if side == "yes" else (100 - yes_ask if yes_ask is not None else None)
+        if mark is not None:
+            return mark
+    return price_cents
+
+
+def _mark_open_positions_to_market(conn, strategy: str) -> tuple[int, int]:
+    """
+    Current mark-to-market value of every OPEN position for this strategy
+    — see _current_mark_for_position()'s docstring for the per-contract
+    valuation rules this aggregates.
 
     Returns (current_value_cents, cost_basis_cents) — the CALLER already
     has cost basis available separately in most cases, but returning both
@@ -584,23 +607,45 @@ def _mark_open_positions_to_market(conn, strategy: str) -> tuple[int, int]:
     current_value = 0
     for ticker, side, count, price_cents in open_trades:
         cost_basis += price_cents * count
-        if side == "both":
-            current_value += 100 * count
-            continue
-
-        latest = conn.execute(
-            "SELECT yes_ask, yes_bid FROM price_history WHERE ticker=? ORDER BY ts DESC LIMIT 1",
-            (ticker,),
-        ).fetchone()
-        mark = None
-        if latest is not None:
-            yes_ask, yes_bid = latest
-            mark = yes_bid if side == "yes" else (100 - yes_ask if yes_ask is not None else None)
-        if mark is None:
-            mark = price_cents  # no usable current quote -- assume unchanged rather than guess
+        mark = _current_mark_for_position(conn, ticker, side, price_cents)
         current_value += mark * count
 
     return current_value, cost_basis
+
+
+def get_open_positions_detail(limit: int = 300) -> list[dict]:
+    """
+    Every currently open position, individually — not aggregated by
+    strategy the way get_shadow_summary() is. This is the data source for
+    the dashboard's "Open Positions" view: what's actually held right now,
+    what it's worth, and why the strategy took it (rationale) plus what
+    it's aiming for (exit_target_cents, when the strategy sets one — only
+    swing does today).
+
+    Ordered most-recently-opened first, since that's usually what someone
+    checking in on the bot cares about seeing near the top.
+    """
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, ts, strategy, ticker, side, count, price_cents, model_probability, "
+            "station_code, measure, exit_target_cents, rationale, confidence "
+            "FROM shadow_trades WHERE status='open' ORDER BY ts DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+        positions = []
+        for r in rows:
+            row = dict(r)
+            mark = _current_mark_for_position(conn, row["ticker"], row["side"], row["price_cents"])
+            cost_basis = row["price_cents"] * row["count"]
+            current_value = mark * row["count"]
+            row["current_price_cents"] = mark
+            row["cost_basis_cents"] = cost_basis
+            row["current_value_cents"] = current_value
+            row["unrealized_pnl_cents"] = current_value - cost_basis
+            positions.append(row)
+        return positions
 
 
 def get_shadow_summary() -> list[dict]:
