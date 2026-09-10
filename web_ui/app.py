@@ -45,6 +45,29 @@ app.secret_key = secrets.token_hex(32)
 
 # ---------- .env helpers ----------
 
+def _trend_arrow(history: list, window_hours: int = 24) -> str | None:
+    """
+    'up' / 'down' / 'flat', or None if there's not enough history yet to
+    say anything. Compares the bankroll at the start of the last
+    `window_hours` to the most recent value — falls back to the very
+    first point on record if the strategy has less than a full window of
+    history, so a brand-new strategy still shows something rather than
+    nothing.
+    """
+    if len(history) < 2:
+        return None
+    now = history[-1][0]
+    cutoff = now - window_hours * 3600
+    windowed = [h for h in history if h[0] >= cutoff]
+    baseline = windowed[0][1] if windowed else history[0][1]
+    latest = history[-1][1]
+    if latest > baseline:
+        return "up"
+    if latest < baseline:
+        return "down"
+    return "flat"
+
+
 def read_env() -> dict:
     d = {}
     if ENV_PATH.exists():
@@ -64,6 +87,21 @@ def write_env(d: dict) -> None:
 def restart_bot() -> str:
     result = subprocess.run(["systemctl", "restart", SERVICE_NAME], capture_output=True, text=True)
     return result.stderr or result.stdout or "restarted"
+
+
+def pull_latest_code() -> tuple[bool, str]:
+    """
+    Runs `git pull` in the bot's own directory. Returns (changed, output) —
+    changed is False for "Already up to date." so the caller can decide
+    whether a restart is even worth doing. This is the single most common
+    action this whole project needed SSH for — pulling code Claude just
+    pushed and restarting to pick it up — so it's worth a real button
+    rather than a terminal round-trip every time.
+    """
+    result = subprocess.run(["git", "pull"], cwd=APP_DIR, capture_output=True, text=True)
+    output = (result.stdout or "") + (result.stderr or "")
+    changed = "Already up to date" not in output
+    return changed, output.strip()
 
 
 def service_status() -> str:
@@ -192,6 +230,7 @@ body {
   background: var(--surface-2); border: 1px solid var(--accent-dim); border-radius: var(--radius);
   padding: 12px 16px; margin-bottom: 20px; font-size: 14px; color: var(--text);
 }
+.banner-warn { border-color: rgba(232,170,76,0.4); color: var(--warning); }
 
 /* ---------- headings ---------- */
 h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
@@ -251,6 +290,11 @@ details.position-row[open] > summary::before { content: "▾ "; }
 .tag.side-no { background: rgba(240,101,79,0.1); color: var(--loss); border-color: rgba(240,101,79,0.25); }
 .tag.side-both { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
 .tag.dampened { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
+.tag.kill-switched { background: rgba(240,101,79,0.1); color: var(--loss); border-color: rgba(240,101,79,0.25); }
+.trend-arrow { font-size: 11px; }
+.trend-up { color: var(--profit); }
+.trend-down { color: var(--loss); }
+details.position-row.big-swing { border-left: 2px solid var(--warning); padding-left: 6px; margin-left: -8px; }
 .position-detail { padding: 0 0 12px 16px; }
 .num-inline { font-size: 12.5px; margin: 0 0 6px; }
 .num-inline .num-label { color: var(--text-dim); font-weight: 500; }
@@ -353,6 +397,7 @@ DASHBOARD_PAGE = """
     <span class="pill {{ 'pill-ok' if status=='active' else 'pill-err' }}"><span class="dot"></span>{{ status }}</span>
     {% if live_mode %}<span class="pill pill-err"><span class="dot"></span>live — real money</span>
     {% else %}<span class="pill pill-neutral"><span class="dot"></span>paper mode</span>{% endif %}
+    {% if last_scan_ago %}<span class="pill {{ 'pill-err' if last_scan_stale else 'pill-neutral' }}"><span class="dot"></span>last scan {{ last_scan_ago }}</span>{% endif %}
   </div>
   <nav class="topbar-links">
     <a href="/export">Export</a>
@@ -361,6 +406,13 @@ DASHBOARD_PAGE = """
 </header>
 
 {% if message %}<div class="banner">{{ message }}</div>{% endif %}
+{% if last_scan_stale %}<div class="banner banner-warn">The bot hasn't completed a scan cycle in a while — it may have stalled. Check the bot log below, or try restarting it.</div>{% endif %}
+{% if strategies_kill_switched or strategies_cooling_off %}
+<div class="banner banner-warn">
+  {% if strategies_kill_switched %}{{ strategies_kill_switched }} strateg{{ 'y is' if strategies_kill_switched == 1 else 'ies are' }} kill-switched for today.{% endif %}
+  {% if strategies_cooling_off %}{{ strategies_cooling_off }} strateg{{ 'y is' if strategies_cooling_off == 1 else 'ies are' }} cooling off after a losing streak.{% endif %}
+</div>
+{% endif %}
 
 <section class="hero">
   <div class="hero-head">
@@ -371,10 +423,12 @@ DASHBOARD_PAGE = """
   <canvas id="strategyChart" height="90"></canvas>
   <div class="position-groups" style="margin-top:16px;">
     {% for s in shadow_summary %}
-    <details class="sub position-group {{ 'rank-1' if s.rank == 1 and s.enough_data else '' }}">
+    <details class="sub position-group {{ 'rank-1' if s.rank == 1 else '' }}">
       <summary>
         <span class="rank-num">#{{ s.rank }}</span>
         <span class="strategy-name">{{ s.strategy }}</span>
+        {% if s.trend == 'up' %}<span class="trend-arrow trend-up">▲</span>{% elif s.trend == 'down' %}<span class="trend-arrow trend-down">▼</span>{% endif %}
+        {% if s.kill_switched %}<span class="tag kill-switched">kill-switched today</span>{% endif %}
         {% if s.dampened %}<span class="tag dampened">cooling off</span>{% endif %}
         <span class="num {{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</span>
         <span class="num">{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }} win</span>
@@ -382,9 +436,6 @@ DASHBOARD_PAGE = """
         <span class="count-badge">{{ s.open }} active</span>
       </summary>
       <div class="sub-body">
-        {% if not s.enough_data %}
-        <p class="warn-text" style="font-size:12px;margin:0 0 10px;">Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.</p>
-        {% endif %}
         <div class="stat-strip">
           <div class="num-block"><span class="num-label">Bankroll</span><span class="num-value">${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</span></div>
           <div class="num-block"><span class="num-label">Deployed</span><span class="num-value">${{ "%.2f"|format((s.open_capital_cents or 0)/100) }}</span></div>
@@ -397,13 +448,14 @@ DASHBOARD_PAGE = """
         {% if positions %}
         <div class="position-list-inner">
           {% for p in positions %}
-          <details class="position-row">
+          <details class="position-row {{ 'big-swing' if p.big_swing else '' }}">
             <summary>
               <span class="ticker">{{ p.ticker }}</span>
               <span class="tag side-{{ p.side }}">{{ p.side }}</span>
               <span class="num">{{ p.price_cents }}c → {{ p.current_price_cents }}c</span>
               <span class="num">×{{ p.count }}</span>
               <span class="num {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
+              {% if p.big_swing %}<span class="tag {{ 'side-yes' if (p.unrealized_pnl_cents or 0) >= 0 else 'side-no' }}">big move</span>{% endif %}
             </summary>
             <div class="position-detail">
               {% if p.exit_target_cents %}<p class="num-inline"><span class="num-label">Goal:</span> sell at {{ p.exit_target_cents }}c</p>{% endif %}
@@ -458,7 +510,7 @@ DASHBOARD_PAGE = """
   <summary>Diagnostics &amp; bot internals</summary>
   <div class="mega-body">
 
-    <details class="sub" open>
+    <details class="sub" open id="default-open-category">
       <summary>By category</summary>
       <div class="sub-body">
         <canvas id="categoryChart" height="80"></canvas>
@@ -468,11 +520,10 @@ DASHBOARD_PAGE = """
             <span class="{{ 'ok' if (data.overall.total_pnl_cents or 0) >= 0 else 'err' }}" style="font-size:13px;margin-left:10px;">{{ "%+.1f%%"|format(data.overall.roi_pct) if data.overall.roi_pct is not none else "—" }} ROI</span>
             <span class="subtext" style="margin-left:8px;display:inline;">{{ data.overall.settled }} settled · {{ "%.0f%%"|format(data.overall.win_rate*100) if data.overall.win_rate is not none else "—" }} win rate</span>
           </h3>
-          {% if not data.overall.enough_data %}<p class="warn-text" style="font-size:12px;">Only {{ data.overall.settled }}/{{ min_sample_size }} settled trades in this category — too early to call.</p>{% endif %}
           <table class="data-table">
             <tr><th>#</th><th>Strategy</th><th>Settled</th><th>Win rate</th><th>ROI</th></tr>
             {% for s in data.strategies %}
-            <tr><td>{{ s.rank }}</td><td>{{ s.strategy }}{% if not s.enough_data %} <span class="warn-text" style="font-size:11px;">(low data)</span>{% endif %}</td>
+            <tr><td>{{ s.rank }}</td><td>{{ s.strategy }}</td>
                 <td>{{ s.settled }}</td><td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
                 <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td></tr>
             {% endfor %}
@@ -580,7 +631,7 @@ DASHBOARD_PAGE = """
   <summary>Settings &amp; controls</summary>
   <div class="mega-body">
 
-    <details class="sub" open>
+    <details class="sub" open id="default-open-configuration">
       <summary>Configuration</summary>
       <div class="sub-body">
         <form method="post" action="/setup">
@@ -590,6 +641,8 @@ DASHBOARD_PAGE = """
           <textarea name="private_key" placeholder="{{ 'leave blank to keep current' if has_private_key else '-----BEGIN ... paste full key contents ...-----END-----' }}"></textarea>
           <label>Anthropic API key {% if has_anthropic_key %}(currently set — leave blank to keep it){% endif %}</label>
           <input type="text" name="anthropic_key" placeholder="{{ 'leave blank to keep current' if has_anthropic_key else 'sk-ant-...' }}">
+          <label>Dashboard password (currently set — leave blank to keep it)</label>
+          <input type="text" name="dashboard_password" placeholder="leave blank to keep current, or type a new one">
           <label>Risk mode</label>
           <select name="risk_mode">
             <option value="conservative" {{ 'selected' if risk_mode=='conservative' else '' }}>Conservative</option>
@@ -640,8 +693,24 @@ DASHBOARD_PAGE = """
       <summary>Bot controls</summary>
       <div class="sub-body">
         <p>Bankroll (last known): ${{ "%.2f"|format(bankroll/100) }}</p>
-        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="restart"><button type="submit">Restart bot</button></form>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="pull_and_restart"><button type="submit">Pull latest code &amp; restart</button></form>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="restart"><button type="submit" class="secondary">Restart bot</button></form>
         <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="stop"><button type="submit" class="secondary">Stop bot</button></form>
+        <p class="subtext" style="margin-top:16px;">Manually trigger a review right now, instead of waiting for its normal schedule:</p>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="run_advisor"><button type="submit" class="secondary">Run advisor now</button></form>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="run_retrospective"><button type="submit" class="secondary">Run retrospective now</button></form>
+      </div>
+    </details>
+
+    <details class="sub">
+      <summary class="warn-text">Wipe all paper data</summary>
+      <div class="sub-body">
+        <p class="subtext">Clears every trade, calibration sample, and retrospective across every strategy — a genuine clean slate. A backup file is saved first, but nothing restores it automatically.</p>
+        <form method="post" action="/wipe_data">
+          <label>Type exactly: WIPE ALL DATA</label>
+          <input type="text" name="confirm">
+          <button type="submit" class="danger">Wipe everything</button>
+        </form>
       </div>
     </details>
 
@@ -699,6 +768,29 @@ DASHBOARD_PAGE = """
     if (categoryDetails.open) buildCategoryChart();
     categoryDetails.addEventListener('toggle', function() { if (this.open) buildCategoryChart(); });
   }
+
+  // Auto-refresh, but never interrupt someone mid-read: "By category" and
+  // "Configuration" default to open and don't count (offsetParent check
+  // also correctly ignores a nested details that's technically open but
+  // invisible because its own closed parent is hiding it). If anything
+  // else is genuinely visible and open, check back sooner instead of
+  // reloading out from under whatever's being read.
+  function somethingIsOpenAndVisible() {
+    const opens = document.querySelectorAll('details[open]');
+    for (const d of opens) {
+      if (d.id === 'default-open-category' || d.id === 'default-open-configuration') continue;
+      if (d.offsetParent !== null) return true;
+    }
+    return false;
+  }
+  function maybeRefresh() {
+    if (!somethingIsOpenAndVisible()) {
+      location.reload();
+    } else {
+      setTimeout(maybeRefresh, 15000);
+    }
+  }
+  setTimeout(maybeRefresh, 45000);
 </script>
 
 </body></html>
@@ -747,6 +839,10 @@ def dashboard():
     open_positions = []
     open_positions_total = 0
     positions_by_strategy = {}
+    strategies_kill_switched = 0
+    strategies_cooling_off = 0
+    last_scan_ago = None
+    last_scan_stale = False
     try:
         shadow_summary = storage.get_shadow_summary()
         for s in shadow_summary:
@@ -758,10 +854,18 @@ def dashboard():
             perf = storage.get_recent_strategy_performance(s["strategy"])
             s["dampened"] = shadow.performance_dampening_multiplier(perf) < 1.0
         category_summary = storage.get_shadow_summary_by_category()
-        for name in shadow.STRATEGIES.keys():
-            history = storage.get_shadow_bankroll_history(name, limit=500)
+        engines = shadow.get_engines()
+        for s in shadow_summary:
+            history = storage.get_shadow_bankroll_history(s["strategy"], limit=500)
             if history:
-                chart_data[name] = [[ts, cents] for ts, cents in history]
+                chart_data[s["strategy"]] = [[ts, cents] for ts, cents in history]
+            s["trend"] = _trend_arrow(history)
+            rm = engines.get(s["strategy"])
+            s["kill_switched"] = bool(rm and rm.state.is_kill_switch_tripped(rm.preset.max_daily_loss_pct))
+            if s["kill_switched"]:
+                strategies_kill_switched += 1
+            if s["dampened"]:
+                strategies_cooling_off += 1
         category_pnl_history = storage.get_category_pnl_over_time()
         decision_summary = storage.get_decision_summary(hours=24)
         now = int(time.time())
@@ -779,6 +883,21 @@ def dashboard():
         confidence_breakdown = storage.get_win_rate_by_confidence()
         open_positions = storage.get_open_positions_detail()
         open_positions_total = storage.get_open_shadow_position_total_count()
+        for p in open_positions:
+            # Flags a position whose unrealized move is unusually large
+            # relative to what was paid for it, so a big swing doesn't get
+            # lost scrolling through a long list of otherwise-ordinary
+            # positions.
+            cost_basis = p["cost_basis_cents"] or 0
+            p["big_swing"] = bool(cost_basis and abs((p["unrealized_pnl_cents"] or 0) / cost_basis) >= 0.20)
+        last_scan_ts_raw = storage.get_meta("last_scan_completed_ts")
+        if last_scan_ts_raw:
+            age_s_scan = now - int(last_scan_ts_raw)
+            last_scan_ago = f"{age_s_scan}s ago" if age_s_scan < 120 else f"{age_s_scan // 60}m ago"
+            # Flag stale if it's been more than 3x the normal poll interval
+            # since the last completed cycle — a real signal the process
+            # has stalled or crash-looped, not just normal cadence.
+            last_scan_stale = age_s_scan > 3 * int(env.get("POLL_INTERVAL_SECONDS", "300"))
         # Grouped by strategy so each strategy's row in the performance
         # table can expand to show its own open positions — merged into
         # one place instead of two separate sections that both organized
@@ -811,6 +930,10 @@ def dashboard():
         open_positions=open_positions,
         open_positions_total=open_positions_total,
         positions_by_strategy=positions_by_strategy,
+        strategies_kill_switched=strategies_kill_switched,
+        strategies_cooling_off=strategies_cooling_off,
+        last_scan_ago=last_scan_ago,
+        last_scan_stale=last_scan_stale,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
@@ -855,6 +978,8 @@ def setup():
         env["KALSHI_API_KEY_ID"] = request.form["kalshi_key_id"].strip()
     if request.form.get("anthropic_key"):
         env["ANTHROPIC_API_KEY"] = request.form["anthropic_key"].strip()
+    if request.form.get("dashboard_password"):
+        env["WEB_UI_PASSWORD"] = request.form["dashboard_password"].strip()
     if request.form.get("private_key"):
         KEY_PATH.write_text(request.form["private_key"].strip() + "\n")
         os.chmod(KEY_PATH, 0o600)
@@ -888,6 +1013,28 @@ def control():
     elif action == "stop":
         subprocess.run(["systemctl", "stop", SERVICE_NAME])
         msg = "Bot stopped."
+    elif action == "pull_and_restart":
+        changed, output = pull_latest_code()
+        if changed:
+            restart_bot()
+            msg = f"Pulled latest code and restarted. {output.splitlines()[-1] if output else ''}"
+        else:
+            msg = "Already up to date — nothing to pull, bot left running as-is."
+    elif action == "run_advisor":
+        try:
+            import advisor
+            count = advisor.generate_suggestions()
+            msg = f"Advisor run complete — {count} new suggestion(s)."
+        except Exception as e:
+            msg = f"Advisor run failed: {e}"
+    elif action == "run_retrospective":
+        try:
+            import retrospective
+            row_id = retrospective.generate_retrospective()
+            msg = "Retrospective generated — refresh to see it below." if row_id is not None \
+                else "Not enough settled trades yet for a retrospective (needs 20+), or the run failed — check the bot log."
+        except Exception as e:
+            msg = f"Retrospective run failed: {e}"
     else:
         msg = "Unknown action."
     return redirect(url_for("dashboard", message=msg))
@@ -930,6 +1077,22 @@ def golive():
         env["LIVE_TRADING_CONFIRMED"] = "false"
         msg = "Back to paper mode."
     write_env(env)
+    restart_bot()
+    return redirect(url_for("dashboard", message=msg))
+
+
+@app.route("/wipe_data", methods=["POST"])
+def wipe_data():
+    # Same confirmation bar as go-live, deliberately — this is just as
+    # irreversible in practice (a backup file exists, but nothing restores
+    # it automatically). Never triggerable by a single accidental click.
+    if request.form.get("confirm", "").strip() != "WIPE ALL DATA":
+        return redirect(url_for("dashboard", message="Confirmation phrase didn't match — nothing was touched."))
+    import reset_all_paper_data
+    result = reset_all_paper_data.wipe_all_data()
+    total_before = sum(v for v in result["before"].values() if isinstance(v, int))
+    msg = (f"Wiped {total_before} rows across every table. Backup saved as "
+           f"{Path(result['backup_path']).name}. Every strategy resumes from its starting bankroll.")
     restart_bot()
     return redirect(url_for("dashboard", message=msg))
 
