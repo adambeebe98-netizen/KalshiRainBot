@@ -216,12 +216,32 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
   background: var(--surface-2); color: var(--text-dim); font-size: 12px;
   padding: 2px 9px; border-radius: 12px; font-family: "IBM Plex Mono", monospace;
 }
-.position-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
-.position-card {
+.position-groups { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+
+/* Per-strategy group — a details.sub, but with its own visible container
+   so it reads as a distinct block even collapsed, unlike the plain-text
+   .sub used inside Diagnostics. */
+details.position-group {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 12px 14px;
 }
-.position-row-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+details.position-group > summary {
+  padding: 10px 14px; font-size: 13.5px; display: flex; align-items: center; gap: 8px;
+}
+details.position-group > summary::before { font-size: 10px; }
+details.position-group .sub-body { padding: 2px 14px 10px 30px; }
+
+/* Per-position row inside a group — collapsed to one compact line of
+   base data (ticker, side, entry->now, size, unrealized) by default;
+   opens to reveal the goal and full reasoning. */
+details.position-row { border-top: 1px solid var(--border); }
+details.position-row:first-child { border-top: none; }
+details.position-row > summary {
+  cursor: pointer; list-style: none; padding: 8px 0; display: flex; align-items: center;
+  gap: 12px; flex-wrap: wrap; font-size: 12.5px;
+}
+details.position-row > summary::-webkit-details-marker { display: none; }
+details.position-row > summary::before { content: "▸ "; color: var(--accent); font-size: 9px; }
+details.position-row[open] > summary::before { content: "▾ "; }
 .ticker { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 500; }
 .tag {
   font-size: 11px; padding: 2px 8px; border-radius: 10px;
@@ -231,14 +251,10 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 .tag.side-no { background: rgba(240,101,79,0.1); color: var(--loss); border-color: rgba(240,101,79,0.25); }
 .tag.side-both { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
 .tag.dampened { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
-.position-row-numbers { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 8px; }
-.num-block { display: flex; flex-direction: column; gap: 1px; }
-.num-block .num-label { font-size: 10.5px; color: var(--text-dim); }
-.num-block .num-value { font-family: "IBM Plex Mono", monospace; font-size: 13px; }
-.position-rationale {
-  font-size: 12.5px; color: var(--text-dim); margin: 6px 0 0; padding-top: 8px;
-  border-top: 1px solid var(--border); font-style: italic;
-}
+.position-detail { padding: 0 0 12px 16px; }
+.num-inline { font-size: 12.5px; margin: 0 0 6px; }
+.num-inline .num-label { color: var(--text-dim); font-weight: 500; }
+.position-rationale { font-size: 12.5px; color: var(--text-dim); margin: 6px 0 0; font-style: italic; }
 
 /* ---------- tables ---------- */
 table.data-table { width: 100%; border-collapse: collapse; }
@@ -337,34 +353,32 @@ DASHBOARD_PAGE = """
     <h1>Open positions</h1>
     <span class="count-badge">{{ open_positions_total }} open</span>
   </div>
-  <p class="subtext">What the bot is holding right now, marked to its current price, with the reasoning behind each one.{% if open_positions_total > open_positions|length %} Showing the most recent {{ open_positions|length }} of {{ open_positions_total }}.{% endif %}</p>
-  <div class="position-list">
-    {% for p in open_positions %}
-    <article class="position-card">
-      <div class="position-row-top">
-        <span class="ticker">{{ p.ticker }}</span>
-        <span class="tag">{{ p.strategy }}</span>
-        <span class="tag side-{{ p.side }}">{{ p.side }}</span>
+  <p class="subtext">What the bot is holding right now, grouped by strategy. Click a strategy to see its positions; click a position for the reasoning behind it.{% if open_positions_total > open_positions|length %} Showing the most recent {{ open_positions|length }} of {{ open_positions_total }}.{% endif %}</p>
+  <div class="position-groups">
+    {% for strat, positions in positions_by_strategy.items() %}
+    <details class="sub position-group">
+      <summary>{{ strat }} <span class="count-badge">{{ positions|length }}</span></summary>
+      <div class="sub-body">
+        {% for p in positions %}
+        <details class="position-row">
+          <summary>
+            <span class="ticker">{{ p.ticker }}</span>
+            <span class="tag side-{{ p.side }}">{{ p.side }}</span>
+            <span class="num">{{ p.price_cents }}c → {{ p.current_price_cents }}c</span>
+            <span class="num">×{{ p.count }}</span>
+            <span class="num {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
+          </summary>
+          <div class="position-detail">
+            {% if p.exit_target_cents %}<p class="num-inline"><span class="num-label">Goal:</span> sell at {{ p.exit_target_cents }}c</p>{% endif %}
+            {% if p.confidence %}<p class="num-inline"><span class="num-label">Confidence:</span> {{ p.confidence }}</p>{% endif %}
+            {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
+          </div>
+        </details>
+        {% endfor %}
       </div>
-      <div class="position-row-numbers">
-        <div class="num-block"><span class="num-label">Entry</span><span class="num-value">{{ p.price_cents }}c</span></div>
-        <div class="num-block"><span class="num-label">Now</span><span class="num-value">{{ p.current_price_cents }}c</span></div>
-        <div class="num-block"><span class="num-label">Size</span><span class="num-value">{{ p.count }}</span></div>
-        <div class="num-block">
-          <span class="num-label">Unrealized</span>
-          <span class="num-value {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
-        </div>
-        {% if p.exit_target_cents %}
-        <div class="num-block"><span class="num-label">Goal</span><span class="num-value">sell at {{ p.exit_target_cents }}c</span></div>
-        {% endif %}
-        {% if p.confidence %}
-        <div class="num-block"><span class="num-label">Confidence</span><span class="num-value">{{ p.confidence }}</span></div>
-        {% endif %}
-      </div>
-      {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
-    </article>
+    </details>
     {% endfor %}
-    {% if not open_positions %}<p class="empty-state">No open positions right now.</p>{% endif %}
+    {% if not positions_by_strategy %}<p class="empty-state">No open positions right now.</p>{% endif %}
   </div>
 </section>
 
@@ -720,6 +734,7 @@ def dashboard():
     confidence_breakdown = []
     open_positions = []
     open_positions_total = 0
+    positions_by_strategy = {}
     try:
         shadow_summary = storage.get_shadow_summary()
         for s in shadow_summary:
@@ -752,6 +767,18 @@ def dashboard():
         confidence_breakdown = storage.get_win_rate_by_confidence()
         open_positions = storage.get_open_positions_detail()
         open_positions_total = storage.get_open_shadow_position_total_count()
+        # Grouped by strategy for the dashboard's collapsible view — a flat
+        # list of every open position becomes an unmanageable scroll past a
+        # handful of trades, so this chunks it into one dropdown per
+        # strategy (busiest first), with each individual position itself
+        # collapsed to a one-line summary until clicked open for the
+        # reasoning behind it.
+        positions_by_strategy: dict[str, list[dict]] = {}
+        for p in open_positions:
+            positions_by_strategy.setdefault(p["strategy"], []).append(p)
+        positions_by_strategy = dict(
+            sorted(positions_by_strategy.items(), key=lambda kv: len(kv[1]), reverse=True)
+        )
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -776,6 +803,7 @@ def dashboard():
         confidence_breakdown=confidence_breakdown,
         open_positions=open_positions,
         open_positions_total=open_positions_total,
+        positions_by_strategy=positions_by_strategy,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
