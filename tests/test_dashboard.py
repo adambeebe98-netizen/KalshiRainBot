@@ -9,15 +9,17 @@ unit test of template internals.
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from tests.helpers import use_temp_db, clear_tables
 
 use_temp_db()
 
 import storage  # noqa: E402
+import shadow  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "web_ui"))
 import app as webapp  # noqa: E402
@@ -38,7 +40,7 @@ class DashboardTestCase(unittest.TestCase):
         with storage.get_conn() as conn:
             clear_tables(conn, "shadow_trades", "trades", "shadow_bankroll_snapshots",
                          "calibration_stats", "suggestions", "retrospectives", "price_history",
-                         "decisions", "strategy_overrides")
+                         "decisions", "strategy_overrides", "meta")
 
 
 class TestAuthGating(DashboardTestCase):
@@ -189,6 +191,173 @@ class TestExportPage(DashboardTestCase):
         self.assertEqual(200, _client().get("/export").status_code)
         self.assertIn("Back to dashboard", body)
         self.assertIn("swing", body)
+
+
+class TestTrendArrow(unittest.TestCase):
+    def test_up_when_latest_exceeds_baseline(self):
+        self.assertEqual(webapp._trend_arrow([(1000, 50000), (2000, 55000)]), "up")
+
+    def test_down_when_latest_is_below_baseline(self):
+        self.assertEqual(webapp._trend_arrow([(1000, 50000), (2000, 45000)]), "down")
+
+    def test_flat_when_unchanged(self):
+        self.assertEqual(webapp._trend_arrow([(1000, 50000), (2000, 50000)]), "flat")
+
+    def test_none_with_fewer_than_two_points(self):
+        self.assertIsNone(webapp._trend_arrow([(1000, 50000)]))
+        self.assertIsNone(webapp._trend_arrow([]))
+
+    def test_uses_the_window_start_not_the_very_first_point_when_history_is_long(self):
+        # A long history where the window-relevant baseline differs from
+        # the very first point on record -- the trend should reflect the
+        # recent window, not all-time history.
+        history = [(0, 100000), (1000, 90000), (90000, 50000), (91000, 55000)]
+        # window_hours=24 -> cutoff is 91000 - 86400 = 4600; only the last
+        # two points (90000, 91000) are within that window.
+        self.assertEqual(webapp._trend_arrow(history, window_hours=24), "up")
+
+
+class TestHeartbeat(DashboardTestCase):
+    def test_shows_last_scan_time_when_fresh(self):
+        storage.set_meta("last_scan_completed_ts", str(int(time.time()) - 30))
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("last scan", body)
+        self.assertNotIn("hasn't completed a scan cycle", body)
+
+    def test_flags_stale_when_last_scan_is_old(self):
+        storage.set_meta("last_scan_completed_ts", str(int(time.time()) - 5000))
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("hasn't completed a scan cycle", body)
+
+    def test_no_heartbeat_pill_when_never_recorded(self):
+        body = _client().get("/").get_data(as_text=True)
+        self.assertNotIn("hasn't completed a scan cycle", body)
+
+
+class TestSafetyBanner(DashboardTestCase):
+    def test_kill_switched_strategy_shows_in_banner_and_per_row_tag(self):
+        for i in range(50):
+            storage.log_shadow_trade("calibrated_conservative", f"L{i}", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("calibrated_conservative", 50000)
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        rm = shadow.get_engines()["calibrated_conservative"]
+        rm.state.realized_pnl_today_cents = -4000
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("kill-switched for today", body)
+        self.assertIn("kill-switched today", body)
+
+    def test_no_banner_when_everything_is_healthy(self):
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertNotIn("kill-switched for today", body)
+        self.assertNotIn("cooling off after a losing streak", body)
+
+
+class TestLowDataWarningsRemoved(DashboardTestCase):
+    def test_never_shows_the_streak_warning_anywhere(self):
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertNotIn("could easily be a streak", body)
+        self.assertNotIn("too early to call", body)
+        self.assertNotIn("(low data)", body)
+
+
+class TestBigSwingFlag(DashboardTestCase):
+    def test_flags_a_position_with_a_large_unrealized_swing(self):
+        storage.log_price_snapshot("T1", yes_ask=None, yes_bid=60)  # bought at 40c, now worth 60c = +50%
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("big move", body)
+
+    def test_does_not_flag_a_small_ordinary_move(self):
+        storage.log_price_snapshot("T2", yes_ask=None, yes_bid=41)  # bought at 40c, now 41c -- tiny move
+        storage.log_shadow_trade("swing", "T2", "yes", 10, 40)
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertNotIn("big move", body)
+
+
+class TestPasswordChange(DashboardTestCase):
+    def test_setting_a_new_password_updates_env(self):
+        with patch.object(webapp, "restart_bot", return_value="restarted"):
+            _client().post("/setup", data={
+                "risk_mode": "balanced", "bankroll": "500", "series": "KXRAIN",
+                "dashboard_password": "newpass456",
+            })
+        self.assertEqual(webapp.read_env().get("WEB_UI_PASSWORD"), "newpass456")
+
+    def test_blank_password_field_keeps_the_existing_one(self):
+        webapp.write_env({**webapp.read_env(), "WEB_UI_PASSWORD": "original123"})
+        with patch.object(webapp, "restart_bot", return_value="restarted"):
+            _client().post("/setup", data={"risk_mode": "balanced", "bankroll": "500", "series": "KXRAIN"})
+        self.assertEqual(webapp.read_env().get("WEB_UI_PASSWORD"), "original123")
+
+
+class TestPullAndRestart(DashboardTestCase):
+    def test_already_up_to_date_skips_restart(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="Already up to date.\n", stderr="")
+            resp = _client().post("/control", data={"action": "pull_and_restart"}, follow_redirects=True)
+        self.assertIn("Already up to date", resp.get_data(as_text=True))
+
+    def test_real_change_pulls_and_restarts(self):
+        with patch("subprocess.run") as mock_run:
+            def side_effect(cmd, **kwargs):
+                if cmd[0] == "git":
+                    return MagicMock(stdout="Updating abc123..def456\n 3 files changed\n", stderr="")
+                return MagicMock(stdout="", stderr="")
+            mock_run.side_effect = side_effect
+            resp = _client().post("/control", data={"action": "pull_and_restart"}, follow_redirects=True)
+        self.assertIn("Pulled latest code", resp.get_data(as_text=True))
+
+
+class TestManualTriggers(DashboardTestCase):
+    def test_run_advisor_reports_suggestion_count(self):
+        with patch.dict(sys.modules, {"advisor": MagicMock(generate_suggestions=lambda: 2)}):
+            resp = _client().post("/control", data={"action": "run_advisor"}, follow_redirects=True)
+        self.assertIn("2 new suggestion", resp.get_data(as_text=True))
+
+    def test_run_advisor_failure_is_handled_without_crashing(self):
+        broken = MagicMock()
+        broken.generate_suggestions.side_effect = RuntimeError("boom")
+        with patch.dict(sys.modules, {"advisor": broken}):
+            resp = _client().post("/control", data={"action": "run_advisor"}, follow_redirects=True)
+        self.assertIn("failed", resp.get_data(as_text=True))
+
+    def test_run_retrospective_success(self):
+        with patch.dict(sys.modules, {"retrospective": MagicMock(generate_retrospective=lambda: 5)}):
+            resp = _client().post("/control", data={"action": "run_retrospective"}, follow_redirects=True)
+        self.assertIn("refresh to see it", resp.get_data(as_text=True))
+
+    def test_run_retrospective_not_enough_data(self):
+        with patch.dict(sys.modules, {"retrospective": MagicMock(generate_retrospective=lambda: None)}):
+            resp = _client().post("/control", data={"action": "run_retrospective"}, follow_redirects=True)
+        self.assertIn("Not enough settled trades", resp.get_data(as_text=True))
+
+
+class TestWipeDataRoute(DashboardTestCase):
+    def test_wrong_confirmation_leaves_data_untouched(self):
+        storage.log_trade("T1", "yes", 5, 40, "paper", None)
+        resp = _client().post("/wipe_data", data={"confirm": "wipe"}, follow_redirects=True)
+        self.assertIn("match", resp.get_data(as_text=True))
+        with storage.get_conn() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        self.assertEqual(n, 1)
+
+    def test_correct_confirmation_wipes_and_reports_backup(self):
+        storage.log_trade("T1", "yes", 5, 40, "paper", None)
+        with patch.object(webapp, "restart_bot", return_value="restarted"):
+            resp = _client().post("/wipe_data", data={"confirm": "WIPE ALL DATA"}, follow_redirects=True)
+        body = resp.get_data(as_text=True)
+        self.assertIn("Wiped", body)
+        self.assertIn("Backup saved as", body)
+        with storage.get_conn() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        self.assertEqual(n, 0)
 
 
 if __name__ == "__main__":
