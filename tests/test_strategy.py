@@ -65,15 +65,17 @@ class TestMarketImpliedProbability(unittest.TestCase):
 class TestEstimatePrecipProbability(unittest.TestCase):
     def test_already_measurable_precip_gives_high_probability(self):
         obs = make_observation(precipitation_last_hour_mm=2.5)
-        prob, rationale = estimate_precip_probability(obs, [], True)
+        prob, rationale, has_signal = estimate_precip_probability(obs, [], True)
         self.assertEqual(prob, 0.97)
         self.assertIn("already recorded", rationale)
+        self.assertTrue(has_signal)
 
     def test_falls_back_to_forecast_pop_when_nothing_observed_yet(self):
         obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
         forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
-        prob, rationale = estimate_precip_probability(obs, forecast, True)
+        prob, rationale, has_signal = estimate_precip_probability(obs, forecast, True)
         self.assertEqual(prob, 0.40)
+        self.assertTrue(has_signal)
 
     def test_takes_the_max_pop_across_the_next_two_periods(self):
         obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
@@ -82,53 +84,64 @@ class TestEstimatePrecipProbability(unittest.TestCase):
             make_forecast_period(probability_of_precipitation_pct=60),
             make_forecast_period(probability_of_precipitation_pct=90),  # 3rd period, should be ignored
         ]
-        prob, rationale = estimate_precip_probability(obs, forecast, True)
+        prob, rationale, has_signal = estimate_precip_probability(obs, forecast, True)
         self.assertEqual(prob, 0.60)
+        self.assertTrue(has_signal)
 
-    def test_no_data_at_all_returns_genuine_uncertainty(self):
-        prob, rationale = estimate_precip_probability(None, [], None)
+    def test_no_data_at_all_returns_genuine_uncertainty_and_flags_no_real_signal(self):
+        prob, rationale, has_signal = estimate_precip_probability(None, [], None)
         self.assertEqual(prob, 0.5)
         self.assertIn("no observation or forecast", rationale)
+        self.assertFalse(has_signal, "THE bug this flag exists to prevent: a 0.5 "
+                          "placeholder must never be treated as a real signal")
 
     def test_zero_precip_observed_falls_through_to_forecast_not_treated_as_measurable(self):
         obs = make_observation(precipitation_last_hour_mm=0.0, precipitation_last_3hr_mm=0.0)
         forecast = [make_forecast_period(probability_of_precipitation_pct=25)]
-        prob, rationale = estimate_precip_probability(obs, forecast, True)
+        prob, rationale, has_signal = estimate_precip_probability(obs, forecast, True)
         self.assertEqual(prob, 0.25, "0.0mm precip must NOT be treated as 'already measurable'")
+        self.assertTrue(has_signal)
 
 
 class TestEstimateTemperatureProbability(unittest.TestCase):
-    def test_no_forecast_temp_returns_genuine_uncertainty(self):
-        prob, rationale = estimate_temperature_probability(75.0, None, 80.0, 90.0)
+    def test_no_forecast_temp_returns_genuine_uncertainty_and_flags_no_real_signal(self):
+        prob, rationale, has_signal = estimate_temperature_probability(75.0, None, 80.0, 90.0)
         self.assertEqual(prob, 0.5)
+        self.assertFalse(has_signal, "THE bug this flag exists to prevent — confirmed live: "
+                          "this exact case traded on a fake ~48c edge against a 2c market")
 
-    def test_no_usable_threshold_returns_genuine_uncertainty(self):
-        prob, rationale = estimate_temperature_probability(75.0, 85.0, None, None)
+    def test_no_usable_threshold_returns_genuine_uncertainty_and_flags_no_real_signal(self):
+        prob, rationale, has_signal = estimate_temperature_probability(75.0, 85.0, None, None)
         self.assertEqual(prob, 0.5)
+        self.assertFalse(has_signal)
 
     def test_forecast_dead_center_of_a_symmetric_band_gives_high_probability(self):
         # forecast exactly matches the band's midpoint -- most of the
         # normal distribution's mass should fall inside [80, 90]
-        prob, _ = estimate_temperature_probability(None, 85.0, 80.0, 90.0)
+        prob, _, has_signal = estimate_temperature_probability(None, 85.0, 80.0, 90.0)
         self.assertGreater(prob, 0.7)
+        self.assertTrue(has_signal)
 
     def test_forecast_far_outside_the_band_gives_low_probability(self):
-        prob, _ = estimate_temperature_probability(None, 60.0, 80.0, 90.0)
+        prob, _, has_signal = estimate_temperature_probability(None, 60.0, 80.0, 90.0)
         self.assertLess(prob, 0.1)
+        self.assertTrue(has_signal)
 
     def test_open_ended_above_threshold_only(self):
         # "above 85F" with a forecast of 90F should be quite likely
-        prob, _ = estimate_temperature_probability(None, 90.0, 85.0, None)
+        prob, _, has_signal = estimate_temperature_probability(None, 90.0, 85.0, None)
         self.assertGreater(prob, 0.5)
+        self.assertTrue(has_signal)
 
     def test_open_ended_below_threshold_only(self):
         # "below 85F" (only an upper bound) with a forecast of 70F should be quite likely
-        prob, _ = estimate_temperature_probability(None, 70.0, None, 85.0)
+        prob, _, has_signal = estimate_temperature_probability(None, 70.0, None, 85.0)
         self.assertGreater(prob, 0.5)
+        self.assertTrue(has_signal)
 
     def test_probability_is_always_clamped_to_valid_range(self):
-        prob_high, _ = estimate_temperature_probability(None, 200.0, 80.0, 90.0)
-        prob_low, _ = estimate_temperature_probability(None, -200.0, 80.0, 90.0)
+        prob_high, _, _ = estimate_temperature_probability(None, 200.0, 80.0, 90.0)
+        prob_low, _, _ = estimate_temperature_probability(None, -200.0, 80.0, 90.0)
         self.assertGreaterEqual(prob_high, 0.01)
         self.assertLessEqual(prob_high, 0.99)
         self.assertGreaterEqual(prob_low, 0.01)
@@ -137,8 +150,8 @@ class TestEstimateTemperatureProbability(unittest.TestCase):
     def test_symmetric_around_the_forecast_mean(self):
         """A band centered exactly on the forecast should give a higher
         probability than an equally-wide band shifted away from it."""
-        centered, _ = estimate_temperature_probability(None, 85.0, 80.0, 90.0)
-        shifted, _ = estimate_temperature_probability(None, 85.0, 90.0, 100.0)
+        centered, _, _ = estimate_temperature_probability(None, 85.0, 80.0, 90.0)
+        shifted, _, _ = estimate_temperature_probability(None, 85.0, 90.0, 100.0)
         self.assertGreater(centered, shifted)
 
 
@@ -210,6 +223,43 @@ class TestEvaluateMarketSideSelection(unittest.TestCase):
                                                observation=None, forecast=forecast)
         # forecast dead-center of the band -> high model probability -> should favor YES at a cheap 30c price
         self.assertEqual(signal.side, "yes")
+
+    def test_no_forecast_data_forces_edge_to_zero_not_a_fake_edge(self):
+        """THE regression, reproduced exactly as seen live: a far
+        out-of-the-money market (2c) with NO forecast temperature
+        available used to produce a ~48c "edge" by comparing a
+        meaningless 0.5 placeholder against the real market price. That
+        edge was never real information — it must be forced to 0
+        regardless of how extreme the market price is."""
+        rules = make_rules(measure="temperature_high", threshold_low_f=91.5, threshold_high_f=None)
+        obs = make_observation(temperature_f=74.0)
+        signal = evaluate_temperature_market("KXHIGHNY-26SEP10-B91.5", yes_price_cents=2,
+                                               rules=rules, observation=obs, forecast=[])
+        self.assertEqual(signal.edge_cents, 0)
+        self.assertIn("no real signal", signal.rationale)
+
+    def test_no_usable_threshold_also_forces_edge_to_zero(self):
+        rules = make_rules(measure="temperature_high", threshold_low_f=None, threshold_high_f=None)
+        forecast = [make_forecast_period(is_daytime=True, temperature_f=85.0)]
+        signal = evaluate_temperature_market("T5", yes_price_cents=5, rules=rules,
+                                               observation=None, forecast=forecast)
+        self.assertEqual(signal.edge_cents, 0)
+
+    def test_no_precip_data_at_all_also_forces_edge_to_zero(self):
+        """Same fix, same bug class, for the rain model."""
+        rules = make_rules(measure="precipitation_daily")
+        signal = evaluate_market("T6", yes_price_cents=3, rules=rules, observation=None, forecast=[])
+        self.assertEqual(signal.edge_cents, 0)
+        self.assertIn("no real signal", signal.rationale)
+
+    def test_a_real_signal_still_produces_a_normal_edge(self):
+        """Confirms the fix doesn't over-correct -- a genuine forecast-based
+        signal must still compute a real, non-zero edge as before."""
+        rules = make_rules(measure="precipitation_daily")
+        obs = make_observation(precipitation_last_hour_mm=5.0)  # -> model_p ~0.97, real signal
+        signal = evaluate_market("T7", yes_price_cents=40, rules=rules, observation=obs, forecast=[])
+        self.assertGreater(signal.edge_cents, 0)
+        self.assertNotIn("no real signal", signal.rationale)
 
 
 if __name__ == "__main__":
