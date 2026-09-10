@@ -89,14 +89,16 @@ def require_login():
 
 
 LOGIN_PAGE = """
-<!doctype html><html><head><title>Kalshi Bot Login</title>
+<!doctype html><html><head><title>Kalshi Weather Bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>{{ css }}</style></head><body>
-<div class="card" style="max-width:360px;margin:80px auto;">
-<h2>Kalshi Weather Bot</h2>
-{% if error %}<p class="err">{{ error }}</p>{% endif %}
+<div class="panel" style="max-width:340px;margin:100px auto;text-align:center;">
+<h1 style="margin-bottom:4px;"><span class="brand-mark">◐</span>Kalshi Weather Bot</h1>
+<p class="subtext">Sign in to view the dashboard.</p>
+{% if error %}<p class="err" style="font-size:13px;">{{ error }}</p>{% endif %}
 <form method="post">
 <input type="password" name="password" placeholder="Dashboard password" autofocus>
-<button type="submit">Log in</button>
+<button type="submit" style="width:100%;">Log in</button>
 </form>
 </div></body></html>
 """
@@ -124,355 +126,553 @@ def logout():
 # ---------- dashboard ----------
 
 CSS = """
-body { background:#0d1117; color:#e6edf3; font-family: -apple-system, sans-serif; }
-.card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:24px; margin-bottom:20px; }
-h1,h2,h3 { color:#e6edf3; }
-input, select, textarea { width:100%; padding:8px; margin:6px 0 14px 0; background:#0d1117; color:#e6edf3;
-  border:1px solid #30363d; border-radius:6px; box-sizing:border-box; font-family:inherit; }
-textarea { font-family: monospace; height:140px; }
-button { background:#238636; color:white; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-size:14px; }
-button.danger { background:#da3633; }
-button.secondary { background:#30363d; }
-.err { color:#f85149; }
-.ok { color:#3fb950; }
-.warn { color:#d29922; }
-label { font-size:13px; color:#8b949e; }
-pre { background:#0d1117; padding:12px; border-radius:6px; overflow-x:auto; font-size:12px; max-height:400px; overflow-y:auto; }
-table { width:100%; border-collapse: collapse; }
-td, th { padding:6px 10px; border-bottom:1px solid #30363d; text-align:left; font-size:13px; }
-a { color:#58a6ff; }
-.pill { padding:3px 10px; border-radius:12px; font-size:12px; }
-.pill.active { background:#1a3a1a; color:#3fb950; }
-.pill.inactive { background:#3a1a1a; color:#f85149; }
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg: #0A0E16;
+  --surface: #121826;
+  --surface-2: #1A2233;
+  --border: #232D40;
+  --text: #E9EEF5;
+  --text-dim: #7C8BA3;
+  --accent: #38BDCB;
+  --accent-dim: #22626B;
+  --profit: #4FD98C;
+  --loss: #F0654F;
+  --warning: #E8AA4C;
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "IBM Plex Sans", -apple-system, sans-serif;
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+.num, td.num, .num-value, table.data-table td:not(:first-child) {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.shell { max-width: 1180px; margin: 0 auto; padding: 0 20px 60px; }
+
+/* ---------- top bar ---------- */
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 0; margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.brand-mark { color: var(--accent); margin-right: 6px; }
+.status-pills { display: flex; gap: 8px; flex: 1; }
+.topbar-links { display: flex; gap: 16px; font-size: 13px; }
+.topbar-links a { color: var(--text-dim); text-decoration: none; }
+.topbar-links a:hover { color: var(--accent); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 500;
+  border: 1px solid transparent;
+}
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.pill.pill-ok { background: rgba(79,217,140,0.1); color: var(--profit); border-color: rgba(79,217,140,0.25); }
+.pill.pill-ok .dot { background: var(--profit); }
+.pill.pill-warn { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
+.pill.pill-warn .dot { background: var(--warning); }
+.pill.pill-err { background: rgba(240,101,79,0.1); color: var(--loss); border-color: rgba(240,101,79,0.25); }
+.pill.pill-err .dot { background: var(--loss); }
+.pill.pill-neutral { background: rgba(124,139,163,0.12); color: var(--text-dim); border-color: var(--border); }
+
+.banner {
+  background: var(--surface-2); border: 1px solid var(--accent-dim); border-radius: var(--radius);
+  padding: 12px 16px; margin-bottom: 20px; font-size: 14px; color: var(--text);
+}
+
+/* ---------- headings ---------- */
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
+.subtext { font-size: 12.5px; color: var(--text-dim); margin: 0 0 16px; }
+.empty-state { color: var(--text-dim); font-size: 14px; padding: 24px 0; text-align: center; }
+
+/* ---------- panels ---------- */
+.panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 20px 22px; margin-bottom: 18px;
+}
+
+/* ---------- hero: open positions ---------- */
+.hero {
+  background: var(--surface); border: 1px solid var(--border); border-top: 2px solid var(--accent);
+  border-radius: var(--radius); padding: 20px 22px; margin-bottom: 18px;
+}
+.hero-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.count-badge {
+  background: var(--surface-2); color: var(--text-dim); font-size: 12px;
+  padding: 2px 9px; border-radius: 12px; font-family: "IBM Plex Mono", monospace;
+}
+.position-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.position-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.position-row-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.ticker { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 500; }
+.tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(56,189,203,0.1); color: var(--accent); border: 1px solid rgba(56,189,203,0.25);
+}
+.tag.side-yes { background: rgba(79,217,140,0.1); color: var(--profit); border-color: rgba(79,217,140,0.25); }
+.tag.side-no { background: rgba(240,101,79,0.1); color: var(--loss); border-color: rgba(240,101,79,0.25); }
+.tag.side-both { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
+.tag.dampened { background: rgba(232,170,76,0.1); color: var(--warning); border-color: rgba(232,170,76,0.25); }
+.position-row-numbers { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 8px; }
+.num-block { display: flex; flex-direction: column; gap: 1px; }
+.num-block .num-label { font-size: 10.5px; color: var(--text-dim); }
+.num-block .num-value { font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+.position-rationale {
+  font-size: 12.5px; color: var(--text-dim); margin: 6px 0 0; padding-top: 8px;
+  border-top: 1px solid var(--border); font-style: italic;
+}
+
+/* ---------- tables ---------- */
+table.data-table { width: 100%; border-collapse: collapse; }
+table.data-table th {
+  text-align: left; font-size: 11px; font-weight: 500; color: var(--text-dim);
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+table.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+table.data-table tr:last-child td { border-bottom: none; }
+table.data-table tr.rank-1 { background: rgba(56,189,203,0.06); }
+
+/* ---------- misc components ---------- */
+.ok { color: var(--profit); }
+.err { color: var(--loss); }
+.warn-text { color: var(--warning); }
+.suggestion-card, .category-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; margin-bottom: 12px;
+}
+.retro-text { white-space: pre-wrap; line-height: 1.6; font-size: 13.5px; }
+.retro-meta { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+
+input, select, textarea {
+  width: 100%; padding: 9px 10px; margin: 6px 0 14px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; box-sizing: border-box;
+  font-family: inherit; font-size: 13.5px;
+}
+textarea { font-family: "IBM Plex Mono", monospace; height: 130px; }
+label { font-size: 12.5px; color: var(--text-dim); display: block; }
+
+button {
+  background: var(--accent); color: #05161A; border: none; padding: 9px 16px;
+  border-radius: 6px; cursor: pointer; font-size: 13.5px; font-weight: 500; font-family: inherit;
+}
+button:hover { filter: brightness(1.1); }
+button.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+button.danger { background: var(--loss); color: #1A0805; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+pre {
+  background: var(--bg); padding: 12px; border-radius: 6px; overflow-x: auto;
+  font-size: 12px; max-height: 400px; overflow-y: auto; font-family: "IBM Plex Mono", monospace;
+  border: 1px solid var(--border);
+}
+a { color: var(--accent); }
+
+/* ---------- collapsible diagnostics/settings ---------- */
+details.mega { margin-bottom: 18px; }
+details.mega > summary {
+  cursor: pointer; list-style: none; user-select: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 18px; font-size: 14px; font-weight: 600; color: var(--text-dim);
+  display: flex; align-items: center; gap: 8px;
+}
+details.mega > summary::-webkit-details-marker { display: none; }
+details.mega > summary::before { content: "▸"; color: var(--accent); font-size: 11px; transition: transform 0.15s; }
+details.mega[open] > summary::before { transform: rotate(90deg); }
+details.mega[open] > summary { border-radius: var(--radius) var(--radius) 0 0; border-bottom: none; }
+.mega-body {
+  border: 1px solid var(--border); border-top: none; border-radius: 0 0 var(--radius) var(--radius);
+  padding: 4px 18px 18px;
+}
+details.sub { margin: 14px 0; }
+details.sub > summary {
+  cursor: pointer; list-style: none; font-size: 13.5px; font-weight: 500; padding: 8px 0; color: var(--text);
+}
+details.sub > summary::-webkit-details-marker { display: none; }
+details.sub > summary::before { content: "▸ "; color: var(--accent); font-size: 10px; }
+details.sub[open] > summary::before { content: "▾ "; }
+.sub-body { padding: 4px 0 12px 16px; }
 """
 
 DASHBOARD_PAGE = """
-<!doctype html><html><head><title>Kalshi Bot Dashboard</title><style>{{ css }}</style></head><body style="max-width:900px;margin:0 auto;padding:20px;">
+<!doctype html><html><head><title>Kalshi Weather Bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{{ css }}</style></head><body>
+<div class="shell">
 
-<h1>Kalshi Weather Bot <span style="float:right;font-size:14px;"><a href="/export">Export data</a> &nbsp;|&nbsp; <a href="/logout">Log out</a></span></h1>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark">◐</span>Kalshi Weather Bot</div>
+  <div class="status-pills">
+    <span class="pill {{ 'pill-ok' if status=='active' else 'pill-err' }}"><span class="dot"></span>{{ status }}</span>
+    {% if live_mode %}<span class="pill pill-err"><span class="dot"></span>live — real money</span>
+    {% else %}<span class="pill pill-neutral"><span class="dot"></span>paper mode</span>{% endif %}
+  </div>
+  <nav class="topbar-links">
+    <a href="/export">Export</a>
+    <a href="/logout">Log out</a>
+  </nav>
+</header>
 
-<div class="card">
-  <h2>Status:
-    <span class="pill {{ 'active' if status=='active' else 'inactive' }}">{{ status }}</span>
-    {% if live_mode %}<span class="pill inactive">LIVE — real money</span>{% else %}<span class="pill active">PAPER — no real money</span>{% endif %}
-    {% if schema_verified %}<span class="pill active">Order schema verified</span>{% else %}<span class="pill inactive">Order schema NOT verified</span>{% endif %}
-  </h2>
-  <p>Bankroll (last known): ${{ "%.2f"|format(bankroll/100) }}</p>
-  <form method="post" action="/control" style="display:inline;">
-    <input type="hidden" name="action" value="restart">
-    <button type="submit">Restart bot</button>
-  </form>
-  <form method="post" action="/control" style="display:inline;">
-    <input type="hidden" name="action" value="stop">
-    <button type="submit" class="secondary">Stop bot</button>
-  </form>
-  {% if message %}<p class="ok">{{ message }}</p>{% endif %}
-</div>
+{% if message %}<div class="banner">{{ message }}</div>{% endif %}
 
-<div class="card">
-  <h2>Recent log</h2>
-  <pre>{{ log_tail }}</pre>
-</div>
+<section class="hero">
+  <div class="hero-head">
+    <h1>Open positions</h1>
+    <span class="count-badge">{{ open_positions|length }} open</span>
+  </div>
+  <p class="subtext">What the bot is holding right now, marked to its current price, with the reasoning behind each one.</p>
+  <div class="position-list">
+    {% for p in open_positions %}
+    <article class="position-card">
+      <div class="position-row-top">
+        <span class="ticker">{{ p.ticker }}</span>
+        <span class="tag">{{ p.strategy }}</span>
+        <span class="tag side-{{ p.side }}">{{ p.side }}</span>
+      </div>
+      <div class="position-row-numbers">
+        <div class="num-block"><span class="num-label">Entry</span><span class="num-value">{{ p.price_cents }}c</span></div>
+        <div class="num-block"><span class="num-label">Now</span><span class="num-value">{{ p.current_price_cents }}c</span></div>
+        <div class="num-block"><span class="num-label">Size</span><span class="num-value">{{ p.count }}</span></div>
+        <div class="num-block">
+          <span class="num-label">Unrealized</span>
+          <span class="num-value {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
+        </div>
+        {% if p.exit_target_cents %}
+        <div class="num-block"><span class="num-label">Goal</span><span class="num-value">sell at {{ p.exit_target_cents }}c</span></div>
+        {% endif %}
+        {% if p.confidence %}
+        <div class="num-block"><span class="num-label">Confidence</span><span class="num-value">{{ p.confidence }}</span></div>
+        {% endif %}
+      </div>
+      {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
+    </article>
+    {% endfor %}
+    {% if not open_positions %}<p class="empty-state">No open positions right now.</p>{% endif %}
+  </div>
+</section>
 
-<div class="card">
-  <h2>Strategy comparison <span style="font-size:12px;color:#8b949e;">(all paper — none of these place real orders)</span></h2>
+<section class="panel">
+  <h2>Strategy performance</h2>
+  <p class="subtext">All paper — none of these place real orders.</p>
   <canvas id="strategyChart" height="90"></canvas>
-  <table style="margin-top:16px;">
-    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Active</th><th>Deployed</th><th>Current Value</th><th>Unrealized</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days tracked</th></tr>
+  <table class="data-table" style="margin-top:16px;">
+    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Active</th><th>Deployed</th><th>Current value</th><th>Unrealized</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days</th></tr>
     {% for s in shadow_summary %}
-    <tr {{ 'style="background:#1a3a1a;"' if s.rank == 1 and s.enough_data else '' }}>
+    <tr class="{{ 'rank-1' if s.rank == 1 and s.enough_data else '' }}">
       <td>{{ s.rank }}</td>
-      <td>{{ s.strategy }}{% if s.dampened %} <span title="This strategy's position sizing is automatically reduced right now due to a recent losing streak — see shadow.py's performance_dampening_multiplier. It recovers on its own as the streak ages out of the rolling window." style="color:#d29922;">⚠ cooling off</span>{% endif %}</td>
+      <td>{{ s.strategy }}{% if s.dampened %} <span class="tag dampened">cooling off</span>{% endif %}</td>
       <td>${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</td>
-      <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">
-        {{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}
-      </td>
+      <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td>
       <td>{{ s.open }}</td>
       <td>${{ "%.2f"|format((s.open_capital_cents or 0)/100) }}</td>
       <td>${{ "%.2f"|format((s.current_value_cents or 0)/100) }}</td>
-      <td class="{{ 'ok' if (s.unrealized_pnl_cents or 0) >= 0 else 'err' }}">
-        {{ "%+.2f"|format((s.unrealized_pnl_cents or 0)/100) }}
-      </td>
+      <td class="{{ 'ok' if (s.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((s.unrealized_pnl_cents or 0)/100) }}</td>
       <td>{{ s.settled }}</td>
       <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
-      <td class="{{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">
-        {{ "%.2f"|format((s.total_pnl_cents or 0)/100) }}
-      </td>
+      <td class="{{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">{{ "%.2f"|format((s.total_pnl_cents or 0)/100) }}</td>
       <td>{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</td>
     </tr>
     {% if not s.enough_data %}
-    <tr><td></td><td colspan="11" class="warn" style="font-size:12px;">
-      ⚠ Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.
-    </td></tr>
+    <tr><td></td><td colspan="11" class="warn-text" style="font-size:12px;">Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.</td></tr>
     {% endif %}
     {% endfor %}
     {% if not shadow_summary %}<tr><td colspan="12">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
   </table>
-</div>
+</section>
 
-<div class="card">
-  <h2>By category <span style="font-size:12px;color:#8b949e;">(same paper trades, split by what kind of market they're on — some categories may just never be profitable, and that's a real finding, not a bug)</span></h2>
-  <canvas id="categoryChart" height="80"></canvas>
-  {% for cat, data in category_summary.items() %}
-  <div style="border:1px solid #30363d;border-radius:6px;padding:14px;margin-bottom:14px;">
-    <h3 style="margin:0 0 6px 0;">
-      {{ cat }}
-      <span class="{{ 'ok' if (data.overall.total_pnl_cents or 0) >= 0 else 'err' }}" style="font-size:14px;margin-left:10px;">
-        {{ "%+.1f%%"|format(data.overall.roi_pct) if data.overall.roi_pct is not none else "—" }} ROI
-      </span>
-      <span style="font-size:12px;color:#8b949e;margin-left:10px;">
-        {{ data.overall.settled }} settled · {{ "%.0f%%"|format(data.overall.win_rate*100) if data.overall.win_rate is not none else "—" }} win rate
-      </span>
-    </h3>
-    {% if not data.overall.enough_data %}
-    <p class="warn" style="font-size:12px;margin:4px 0 10px 0;">
-      ⚠ Only {{ data.overall.settled }}/{{ min_sample_size }} settled trades in this category overall — too early to call this category profitable or not.
-    </p>
-    {% endif %}
-    <table>
-      <tr><th>#</th><th>Strategy</th><th>Settled</th><th>Win rate</th><th>ROI</th></tr>
-      {% for s in data.strategies %}
-      <tr>
-        <td>{{ s.rank }}</td>
-        <td>{{ s.strategy }}{% if not s.enough_data %} <span class="warn" style="font-size:11px;">(low data)</span>{% endif %}</td>
-        <td>{{ s.settled }}</td>
-        <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
-        <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-  </div>
-  {% endfor %}
-  {% if not category_summary %}<p style="color:#8b949e;">No settled trades yet — categories will appear once shadow trades resolve.</p>{% endif %}
-</div>
+<section class="panel">
+  <h2>Loss analysis</h2>
+  <p class="subtext">Claude's periodic qualitative review of settled trades — read-only, nothing here changes any behavior automatically.</p>
+  {% if latest_retrospective %}
+  <p class="retro-meta">Reviewed {{ latest_retrospective.trades_analyzed }} trades ({{ latest_retrospective.wins_analyzed }} won, {{ latest_retrospective.losses_analyzed }} lost) — {{ latest_retrospective.ago }} ago.</p>
+  <div class="retro-text">{{ latest_retrospective.analysis_text }}</div>
+  {% else %}
+  <p class="empty-state">No retrospective yet — needs at least 20 settled trades in the review window.</p>
+  {% endif %}
+</section>
 
-<div class="card">
-  <h2>Why isn't it trading? <span style="font-size:12px;color:#8b949e;">(last 24h, main bot's decision gate — every scanned market lands in exactly one of these buckets)</span></h2>
-  <p>{{ decision_summary.counts.total }} markets evaluated — {{ decision_summary.counts.traded }} traded, {{ decision_summary.counts.skipped }} skipped.</p>
-  <table>
-    <tr><th>Skip reason</th><th>Count</th></tr>
-    {% for reason, count in decision_summary.skip_reasons.items() %}
-    <tr><td>{{ reason }}</td><td>{{ count }}</td></tr>
-    {% endfor %}
-    {% if not decision_summary.skip_reasons %}<tr><td colspan="2">No skips logged in the last 24h.</td></tr>{% endif %}
-  </table>
-</div>
-
-<div class="card">
-  <h2>Open markets <span style="font-size:12px;color:#8b949e;">(currently being scanned — a ticker drops off this list once the bot stops seeing fresh quotes for it, meaning it closed or settled)</span></h2>
-  <table>
-    <tr><th>Ticker</th><th>Yes ask</th><th>Yes bid</th><th>No ask (implied)</th><th>Last seen</th></tr>
-    {% for m in open_markets %}
-    <tr><td>{{ m.ticker }}</td><td>{{ (m.yes_ask ~ 'c') if m.yes_ask is not none else '— (no live ask)' }}</td>
-        <td>{{ (m.yes_bid ~ 'c') if m.yes_bid is not none else '—' }}</td>
-        <td>{{ ((100 - m.yes_bid) ~ 'c') if m.yes_bid is not none else '—' }}</td>
-        <td>{{ m.last_seen }}</td></tr>
-    {% endfor %}
-    {% if not open_markets %}<tr><td colspan="5">No markets scanned yet this cycle.</td></tr>{% endif %}
-  </table>
-</div>
-
-<div class="card">
-  <h2>Recent trades</h2>
-  <table>
-    <tr><th>Time</th><th>Ticker</th><th>Side</th><th>Count</th><th>Price</th><th>Status</th><th>PnL</th></tr>
-    {% for t in trades %}
-    <tr><td>{{ t.time }}</td><td>{{ t.ticker }}</td><td>{{ t.side }}</td><td>{{ t.count }}</td>
-        <td>{{ t.price }}c</td><td>{{ t.status }}</td><td>{{ t.pnl }}</td></tr>
-    {% endfor %}
-    {% if not trades %}<tr><td colspan="7">No trades yet.</td></tr>{% endif %}
-  </table>
-</div>
-
-<div class="card">
-  <h2>Calibration (per-station learning)</h2>
-  <table>
-    <tr><th>Station</th><th>Measure</th><th>Settled trades</th><th>Model avg</th><th>Actual avg</th><th>Bias applied</th></tr>
-    {% for c in calibration_rows %}
-    <tr><td>{{ c.station }}</td><td>{{ c.measure }}</td><td>{{ c.n }}</td>
-        <td>{{ c.model_avg }}</td><td>{{ c.actual_avg }}</td><td>{{ c.bias }}</td></tr>
-    {% endfor %}
-    {% if not calibration_rows %}<tr><td colspan="6">No calibration data yet — needs settled trades.</td></tr>{% endif %}
-  </table>
-</div>
-
-<div class="card">
-  <h2>Does the model's own confidence predict outcomes? <span style="font-size:12px;color:#8b949e;">(quantitative, not LLM-based — a direct check on whether bigger claimed edge or higher confidence actually wins more)</span></h2>
-  <p style="font-size:13px;color:#8b949e;margin-bottom:4px;">By estimated edge at decision time:</p>
-  <table>
-    <tr><th>Edge size</th><th>Settled trades</th><th>Win rate</th><th>Total P&L</th></tr>
-    {% for b in edge_buckets %}
-    <tr><td>{{ b.edge_bucket }}</td><td>{{ b.trades }}</td>
-        <td>{{ "%.0f%%"|format(b.win_rate*100) if b.win_rate is not none else "—" }}</td>
-        <td class="{{ 'ok' if (b.total_pnl_cents or 0) >= 0 else 'err' }}">
-          {{ "%.2f"|format((b.total_pnl_cents or 0)/100) }}
-        </td></tr>
-    {% endfor %}
-    {% if not edge_buckets or edge_buckets|sum(attribute='trades') == 0 %}
-    <tr><td colspan="4">No settled trades with a real model probability yet.</td></tr>
-    {% endif %}
-  </table>
-  <p style="font-size:13px;color:#8b949e;margin:12px 0 4px;">By rules-extraction confidence:</p>
-  <table>
-    <tr><th>Confidence</th><th>Settled trades</th><th>Win rate</th><th>Total P&L</th></tr>
-    {% for c in confidence_breakdown %}
-    <tr><td>{{ c.confidence }}</td><td>{{ c.trades }}</td>
-        <td>{{ "%.0f%%"|format(c.win_rate*100) if c.win_rate is not none else "—" }}</td>
-        <td class="{{ 'ok' if (c.total_pnl_cents or 0) >= 0 else 'err' }}">
-          {{ "%.2f"|format((c.total_pnl_cents or 0)/100) }}
-        </td></tr>
-    {% endfor %}
-    {% if not confidence_breakdown %}<tr><td colspan="4">No settled trades yet.</td></tr>{% endif %}
-  </table>
-</div>
-
-<div class="card">
-  <h2>Suggestions <span style="font-size:12px;color:#8b949e;">(Claude's weekly review of swing/favorites/longshot thresholds — nothing changes until you click Apply)</span></h2>
+<section class="panel">
+  <h2>Suggestions</h2>
+  <p class="subtext">Claude's weekly review of swing/favorites/longshot thresholds — nothing changes until you click Apply.</p>
   {% for s in suggestions %}
-  <div style="border:1px solid #30363d;border-radius:6px;padding:12px;margin-bottom:10px;">
+  <div class="suggestion-card">
     <strong>{{ s.strategy }}.{{ s.param }}</strong>: {{ s.current_value }} → {{ s.suggested_value }}
-    <p style="color:#8b949e;margin:6px 0;">{{ s.rationale }}</p>
+    <p class="subtext" style="margin:6px 0;">{{ s.rationale }}</p>
     <form method="post" action="/suggestion" style="display:inline;">
-      <input type="hidden" name="id" value="{{ s.id }}">
-      <input type="hidden" name="action" value="apply">
+      <input type="hidden" name="id" value="{{ s.id }}"><input type="hidden" name="action" value="apply">
       <button type="submit">Apply</button>
     </form>
     <form method="post" action="/suggestion" style="display:inline;">
-      <input type="hidden" name="id" value="{{ s.id }}">
-      <input type="hidden" name="action" value="dismiss">
+      <input type="hidden" name="id" value="{{ s.id }}"><input type="hidden" name="action" value="dismiss">
       <button type="submit" class="secondary">Dismiss</button>
     </form>
   </div>
   {% endfor %}
-  {% if not suggestions %}<p style="color:#8b949e;">No pending suggestions right now — check back after the next weekly review, or once more trades have settled.</p>{% endif %}
-</div>
+  {% if not suggestions %}<p class="empty-state">No pending suggestions right now.</p>{% endif %}
+</section>
 
-<div class="card">
-  <h2>Loss analysis <span style="font-size:12px;color:#8b949e;">(Claude's periodic qualitative review of settled trades — read-only, nothing here changes any behavior automatically)</span></h2>
-  {% if latest_retrospective %}
-  <p style="color:#8b949e;font-size:12px;">
-    Reviewed {{ latest_retrospective.trades_analyzed }} trades ({{ latest_retrospective.wins_analyzed }} won,
-    {{ latest_retrospective.losses_analyzed }} lost) — {{ latest_retrospective.ago }} ago.
-  </p>
-  <div style="white-space:pre-wrap;line-height:1.5;">{{ latest_retrospective.analysis_text }}</div>
-  {% else %}
-  <p style="color:#8b949e;">No retrospective yet — needs at least 20 settled trades in the review window.</p>
-  {% endif %}
-</div>
+<details class="mega">
+  <summary>Diagnostics &amp; bot internals</summary>
+  <div class="mega-body">
 
-<div class="card">
-  <h2>Configuration</h2>
-  <form method="post" action="/setup">
-    <label>Kalshi API Key ID {% if has_kalshi_key %}(currently set — leave blank to keep it){% endif %}</label>
-    <input type="text" name="kalshi_key_id" placeholder="{{ 'leave blank to keep current' if has_kalshi_key else 'paste your Kalshi Key ID' }}">
+    <details class="sub" open>
+      <summary>By category</summary>
+      <div class="sub-body">
+        <canvas id="categoryChart" height="80"></canvas>
+        {% for cat, data in category_summary.items() %}
+        <div class="category-card">
+          <h3>{{ cat }}
+            <span class="{{ 'ok' if (data.overall.total_pnl_cents or 0) >= 0 else 'err' }}" style="font-size:13px;margin-left:10px;">{{ "%+.1f%%"|format(data.overall.roi_pct) if data.overall.roi_pct is not none else "—" }} ROI</span>
+            <span class="subtext" style="margin-left:8px;display:inline;">{{ data.overall.settled }} settled · {{ "%.0f%%"|format(data.overall.win_rate*100) if data.overall.win_rate is not none else "—" }} win rate</span>
+          </h3>
+          {% if not data.overall.enough_data %}<p class="warn-text" style="font-size:12px;">Only {{ data.overall.settled }}/{{ min_sample_size }} settled trades in this category — too early to call.</p>{% endif %}
+          <table class="data-table">
+            <tr><th>#</th><th>Strategy</th><th>Settled</th><th>Win rate</th><th>ROI</th></tr>
+            {% for s in data.strategies %}
+            <tr><td>{{ s.rank }}</td><td>{{ s.strategy }}{% if not s.enough_data %} <span class="warn-text" style="font-size:11px;">(low data)</span>{% endif %}</td>
+                <td>{{ s.settled }}</td><td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
+                <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td></tr>
+            {% endfor %}
+          </table>
+        </div>
+        {% endfor %}
+        {% if not category_summary %}<p class="empty-state">No settled trades yet.</p>{% endif %}
+      </div>
+    </details>
 
-    <label>Kalshi private key {% if has_private_key %}(currently set — leave blank to keep it){% endif %}</label>
-    <textarea name="private_key" placeholder="{{ 'leave blank to keep current' if has_private_key else '-----BEGIN ... paste full key contents ...-----END-----' }}"></textarea>
+    <details class="sub">
+      <summary>Does the model's own confidence predict outcomes?</summary>
+      <div class="sub-body">
+        <p class="subtext">By estimated edge at decision time:</p>
+        <table class="data-table">
+          <tr><th>Edge size</th><th>Settled</th><th>Win rate</th><th>Total P&L</th></tr>
+          {% for b in edge_buckets %}
+          <tr><td>{{ b.edge_bucket }}</td><td>{{ b.trades }}</td><td>{{ "%.0f%%"|format(b.win_rate*100) if b.win_rate is not none else "—" }}</td>
+              <td class="{{ 'ok' if (b.total_pnl_cents or 0) >= 0 else 'err' }}">{{ "%.2f"|format((b.total_pnl_cents or 0)/100) }}</td></tr>
+          {% endfor %}
+          {% if not edge_buckets or edge_buckets|sum(attribute='trades') == 0 %}<tr><td colspan="4">No settled trades with a real model probability yet.</td></tr>{% endif %}
+        </table>
+        <p class="subtext" style="margin-top:12px;">By rules-extraction confidence:</p>
+        <table class="data-table">
+          <tr><th>Confidence</th><th>Settled</th><th>Win rate</th><th>Total P&L</th></tr>
+          {% for c in confidence_breakdown %}
+          <tr><td>{{ c.confidence }}</td><td>{{ c.trades }}</td><td>{{ "%.0f%%"|format(c.win_rate*100) if c.win_rate is not none else "—" }}</td>
+              <td class="{{ 'ok' if (c.total_pnl_cents or 0) >= 0 else 'err' }}">{{ "%.2f"|format((c.total_pnl_cents or 0)/100) }}</td></tr>
+          {% endfor %}
+          {% if not confidence_breakdown %}<tr><td colspan="4">No settled trades yet.</td></tr>{% endif %}
+        </table>
+      </div>
+    </details>
 
-    <label>Anthropic API key {% if has_anthropic_key %}(currently set — leave blank to keep it){% endif %}</label>
-    <input type="text" name="anthropic_key" placeholder="{{ 'leave blank to keep current' if has_anthropic_key else 'sk-ant-...' }}">
+    <details class="sub">
+      <summary>Calibration (per-station learning)</summary>
+      <div class="sub-body">
+        <table class="data-table">
+          <tr><th>Station</th><th>Measure</th><th>Settled</th><th>Model avg</th><th>Actual avg</th><th>Bias applied</th></tr>
+          {% for c in calibration_rows %}
+          <tr><td>{{ c.station }}</td><td>{{ c.measure }}</td><td>{{ c.n }}</td><td>{{ c.model_avg }}</td><td>{{ c.actual_avg }}</td><td>{{ c.bias }}</td></tr>
+          {% endfor %}
+          {% if not calibration_rows %}<tr><td colspan="6">No calibration data yet.</td></tr>{% endif %}
+        </table>
+      </div>
+    </details>
 
-    <label>Risk mode</label>
-    <select name="risk_mode">
-      <option value="conservative" {{ 'selected' if risk_mode=='conservative' else '' }}>Conservative</option>
-      <option value="balanced" {{ 'selected' if risk_mode=='balanced' else '' }}>Balanced</option>
-      <option value="aggressive" {{ 'selected' if risk_mode=='aggressive' else '' }}>Aggressive</option>
-    </select>
+    <details class="sub">
+      <summary>Why isn't it trading?</summary>
+      <div class="sub-body">
+        <p class="subtext">Last 24h, main bot's decision gate — every scanned market lands in exactly one bucket.</p>
+        <p>{{ decision_summary.counts.total }} markets evaluated — {{ decision_summary.counts.traded }} traded, {{ decision_summary.counts.skipped }} skipped.</p>
+        <table class="data-table">
+          <tr><th>Skip reason</th><th>Count</th></tr>
+          {% for reason, count in decision_summary.skip_reasons.items() %}<tr><td>{{ reason }}</td><td>{{ count }}</td></tr>{% endfor %}
+          {% if not decision_summary.skip_reasons %}<tr><td colspan="2">No skips logged in the last 24h.</td></tr>{% endif %}
+        </table>
+      </div>
+    </details>
 
-    <label>Starting paper bankroll ($)</label>
-    <input type="number" name="bankroll" value="{{ bankroll_dollars }}">
+    <details class="sub">
+      <summary>Open markets scanner</summary>
+      <div class="sub-body">
+        <table class="data-table">
+          <tr><th>Ticker</th><th>Yes ask</th><th>Yes bid</th><th>No ask (implied)</th><th>Last seen</th></tr>
+          {% for m in open_markets %}
+          <tr><td>{{ m.ticker }}</td><td>{{ (m.yes_ask ~ 'c') if m.yes_ask is not none else '— (no live ask)' }}</td>
+              <td>{{ (m.yes_bid ~ 'c') if m.yes_bid is not none else '—' }}</td>
+              <td>{{ ((100 - m.yes_bid) ~ 'c') if m.yes_bid is not none else '—' }}</td><td>{{ m.last_seen }}</td></tr>
+          {% endfor %}
+          {% if not open_markets %}<tr><td colspan="5">No markets scanned yet this cycle.</td></tr>{% endif %}
+        </table>
+      </div>
+    </details>
 
-    <label>Series tickers (comma-separated)</label>
-    <input type="text" name="series" value="{{ series }}">
+    <details class="sub">
+      <summary>Recent trades (raw)</summary>
+      <div class="sub-body">
+        <table class="data-table">
+          <tr><th>Time</th><th>Ticker</th><th>Side</th><th>Count</th><th>Price</th><th>Status</th><th>PnL</th></tr>
+          {% for t in trades %}
+          <tr><td>{{ t.time }}</td><td>{{ t.ticker }}</td><td>{{ t.side }}</td><td>{{ t.count }}</td><td>{{ t.price }}c</td><td>{{ t.status }}</td><td>{{ t.pnl }}</td></tr>
+          {% endfor %}
+          {% if not trades %}<tr><td colspan="7">No trades yet.</td></tr>{% endif %}
+        </table>
+      </div>
+    </details>
 
-    <button type="submit">Save and restart bot</button>
-  </form>
-</div>
+    <details class="sub">
+      <summary>Bankroll charts</summary>
+      <div class="sub-body">
+        <canvas id="strategyChart2" height="90"></canvas>
+      </div>
+    </details>
 
-<div class="card">
-  <h2>Order schema verification</h2>
-  <p>Confirms create_order()/cancel_order() have been tested against a real order round-trip on Kalshi's demo API. Required before live trading can be enabled — see kalshi_client.py's create_order() docstring for why.</p>
-  {% if schema_verified %}
-    <p>Status: verified.</p>
-    <form method="post" action="/verify_schema">
-      <button type="submit" name="action" value="off" class="secondary">Mark unverified</button>
-    </form>
-  {% else %}
-    <p>Status: not verified. Test create_order()/cancel_order() against the demo API (a full buy-then-cancel round trip) before flipping this on.</p>
-    <form method="post" action="/verify_schema">
-      <button type="submit" name="action" value="on">Mark schema verified</button>
-    </form>
-  {% endif %}
-</div>
+    <details class="sub">
+      <summary>Bot log</summary>
+      <div class="sub-body"><pre>{{ log_tail }}</pre></div>
+    </details>
 
-<div class="card">
-  <h2 class="warn">Go live (real money)</h2>
-  <p>Only do this after running in paper mode for a while and checking the trades table above.</p>
-  {% if not schema_verified and not live_mode %}
-    <p class="warn">Order schema must be verified (above) before live trading can be enabled.</p>
-  {% endif %}
-  <form method="post" action="/golive">
-    {% if live_mode %}
-      <button type="submit" name="action" value="off">Switch back to paper mode</button>
-    {% else %}
-      <label>Type exactly: I ACCEPT THE RISK</label>
-      <input type="text" name="confirm">
-      <button type="submit" name="action" value="on" class="danger" {{ 'disabled' if not schema_verified else '' }}>Enable live trading</button>
-    {% endif %}
-  </form>
+  </div>
+</details>
+
+<details class="mega">
+  <summary>Settings &amp; controls</summary>
+  <div class="mega-body">
+
+    <details class="sub" open>
+      <summary>Configuration</summary>
+      <div class="sub-body">
+        <form method="post" action="/setup">
+          <label>Kalshi API Key ID {% if has_kalshi_key %}(currently set — leave blank to keep it){% endif %}</label>
+          <input type="text" name="kalshi_key_id" placeholder="{{ 'leave blank to keep current' if has_kalshi_key else 'paste your Kalshi Key ID' }}">
+          <label>Kalshi private key {% if has_private_key %}(currently set — leave blank to keep it){% endif %}</label>
+          <textarea name="private_key" placeholder="{{ 'leave blank to keep current' if has_private_key else '-----BEGIN ... paste full key contents ...-----END-----' }}"></textarea>
+          <label>Anthropic API key {% if has_anthropic_key %}(currently set — leave blank to keep it){% endif %}</label>
+          <input type="text" name="anthropic_key" placeholder="{{ 'leave blank to keep current' if has_anthropic_key else 'sk-ant-...' }}">
+          <label>Risk mode</label>
+          <select name="risk_mode">
+            <option value="conservative" {{ 'selected' if risk_mode=='conservative' else '' }}>Conservative</option>
+            <option value="balanced" {{ 'selected' if risk_mode=='balanced' else '' }}>Balanced</option>
+            <option value="aggressive" {{ 'selected' if risk_mode=='aggressive' else '' }}>Aggressive</option>
+          </select>
+          <label>Starting paper bankroll ($)</label>
+          <input type="number" name="bankroll" value="{{ bankroll_dollars }}">
+          <label>Series tickers (comma-separated)</label>
+          <input type="text" name="series" value="{{ series }}">
+          <button type="submit">Save and restart bot</button>
+        </form>
+      </div>
+    </details>
+
+    <details class="sub">
+      <summary>Order schema verification</summary>
+      <div class="sub-body">
+        <p class="subtext">Confirms create_order()/cancel_order() have been tested against a real order round-trip on Kalshi's demo API. Required before live trading can be enabled.</p>
+        {% if schema_verified %}
+          <p>Status: verified.</p>
+          <form method="post" action="/verify_schema"><button type="submit" name="action" value="off" class="secondary">Mark unverified</button></form>
+        {% else %}
+          <p>Status: not verified.</p>
+          <form method="post" action="/verify_schema"><button type="submit" name="action" value="on">Mark schema verified</button></form>
+        {% endif %}
+      </div>
+    </details>
+
+    <details class="sub">
+      <summary class="warn-text">Go live (real money)</summary>
+      <div class="sub-body">
+        <p class="subtext">Only do this after running in paper mode for a while and checking the trades above.</p>
+        {% if not schema_verified and not live_mode %}<p class="warn-text">Order schema must be verified first.</p>{% endif %}
+        <form method="post" action="/golive">
+          {% if live_mode %}
+            <button type="submit" name="action" value="off">Switch back to paper mode</button>
+          {% else %}
+            <label>Type exactly: I ACCEPT THE RISK</label>
+            <input type="text" name="confirm">
+            <button type="submit" name="action" value="on" class="danger" {{ 'disabled' if not schema_verified else '' }}>Enable live trading</button>
+          {% endif %}
+        </form>
+      </div>
+    </details>
+
+    <details class="sub">
+      <summary>Bot controls</summary>
+      <div class="sub-body">
+        <p>Bankroll (last known): ${{ "%.2f"|format(bankroll/100) }}</p>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="restart"><button type="submit">Restart bot</button></form>
+        <form method="post" action="/control" style="display:inline;"><input type="hidden" name="action" value="stop"><button type="submit" class="secondary">Stop bot</button></form>
+      </div>
+    </details>
+
+  </div>
+</details>
+
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
   const chartData = {{ chart_data|tojson }};
-  const ctx = document.getElementById('strategyChart');
-  const colors = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#39c5cf'];
-  new Chart(ctx, {
-    type: 'line',
-    data: {
-      datasets: Object.keys(chartData).map((name, i) => ({
-        label: name,
-        data: chartData[name].map(p => ({x: p[0]*1000, y: p[1]/100})),
-        borderColor: colors[i % colors.length],
-        backgroundColor: 'transparent',
-        tension: 0.1,
-        pointRadius: 2,
-      }))
+  const colors = ['#38BDCB','#4FD98C','#E8AA4C','#F0654F','#9B8CFF','#5FD0E8'];
+  const chartOpts = {
+    responsive: true,
+    scales: {
+      x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#7C8BA3' }, grid: { color: '#232D40' } },
+      y: { ticks: { color: '#7C8BA3', callback: v => '$' + v }, grid: { color: '#232D40' } }
     },
-    options: {
-      responsive: true,
-      scales: {
-        x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
-        y: { ticks: { color: '#8b949e', callback: v => '$' + v }, grid: { color: '#30363d' } }
-      },
-      plugins: { legend: { labels: { color: '#e6edf3' } } }
-    }
-  });
+    plugins: { legend: { labels: { color: '#E9EEF5' } } }
+  };
+  function buildStrategyChart(ctx) {
+    if (!ctx) return;
+    new Chart(ctx, {
+      type: 'line',
+      data: { datasets: Object.keys(chartData).map((name, i) => ({
+        label: name, data: chartData[name].map(p => ({x: p[0]*1000, y: p[1]/100})),
+        borderColor: colors[i % colors.length], backgroundColor: 'transparent', tension: 0.1, pointRadius: 2,
+      })) },
+      options: chartOpts,
+    });
+  }
+  buildStrategyChart(document.getElementById('strategyChart'));
+  document.querySelector('details.mega:nth-of-type(1)').addEventListener('toggle', function() {
+    if (this.open) buildStrategyChart(document.getElementById('strategyChart2'));
+  }, { once: true });
 
   const categoryPnlData = {{ category_pnl_history|tojson }};
-  const categoryColors = { Rain: '#58a6ff', Temperature: '#d29922', Other: '#bc8cff' };
-  new Chart(document.getElementById('categoryChart'), {
-    type: 'line',
-    data: {
-      datasets: Object.keys(categoryPnlData).map((cat, i) => ({
-        label: cat + ' (cumulative P&L)',
-        data: categoryPnlData[cat].map(p => ({x: p[0]*1000, y: p[1]/100})),
-        borderColor: categoryColors[cat] || ['#3fb950','#f85149','#39c5cf'][i % 3],
-        backgroundColor: 'transparent',
-        tension: 0.1,
-        pointRadius: 2,
-      }))
-    },
-    options: {
-      responsive: true,
-      scales: {
-        x: { type: 'time', time: { unit: 'day' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
-        y: { ticks: { color: '#8b949e', callback: v => '$' + v }, grid: { color: '#30363d' } }
-      },
-      plugins: { legend: { labels: { color: '#e6edf3' } } }
-    }
-  });
+  const categoryColors = { Rain: '#38BDCB', Temperature: '#E8AA4C', Other: '#9B8CFF' };
+  function buildCategoryChart() {
+    const el = document.getElementById('categoryChart');
+    if (!el || el.dataset.built) return;
+    el.dataset.built = '1';
+    new Chart(el, {
+      type: 'line',
+      data: { datasets: Object.keys(categoryPnlData).map((cat, i) => ({
+        label: cat + ' (cumulative P&L)', data: categoryPnlData[cat].map(p => ({x: p[0]*1000, y: p[1]/100})),
+        borderColor: categoryColors[cat] || colors[i % colors.length], backgroundColor: 'transparent', tension: 0.1, pointRadius: 2,
+      })) },
+      options: chartOpts,
+    });
+  }
+  const categoryDetails = document.getElementById('categoryChart') ? document.getElementById('categoryChart').closest('details') : null;
+  if (categoryDetails) {
+    if (categoryDetails.open) buildCategoryChart();
+    categoryDetails.addEventListener('toggle', function() { if (this.open) buildCategoryChart(); });
+  }
 </script>
 
 </body></html>
@@ -518,6 +718,7 @@ def dashboard():
     latest_retrospective = None
     edge_buckets = []
     confidence_breakdown = []
+    open_positions = []
     try:
         shadow_summary = storage.get_shadow_summary()
         for s in shadow_summary:
@@ -548,6 +749,7 @@ def dashboard():
             latest_retrospective = {**r, "ago": ago}
         edge_buckets = storage.get_win_rate_by_edge_bucket()
         confidence_breakdown = storage.get_win_rate_by_confidence()
+        open_positions = storage.get_open_positions_detail()
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
@@ -570,6 +772,7 @@ def dashboard():
         latest_retrospective=latest_retrospective,
         edge_buckets=edge_buckets,
         confidence_breakdown=confidence_breakdown,
+        open_positions=open_positions,
         has_kalshi_key=bool(env.get("KALSHI_API_KEY_ID")),
         has_private_key=KEY_PATH.exists() and KEY_PATH.stat().st_size > 100,
         has_anthropic_key=bool(env.get("ANTHROPIC_API_KEY")),
@@ -694,10 +897,16 @@ def golive():
 
 
 EXPORT_PAGE = """
-<!doctype html><html><head><title>Export data</title><style>{{ css }}</style></head><body style="max-width:900px;margin:0 auto;padding:20px;">
-<h1>Export <span style="float:right;font-size:14px;"><a href="/">Back to dashboard</a></span></h1>
-<p style="color:#8b949e;">Copy everything in the box below and paste it into your chat with Claude when you want to talk through what's actually happening.</p>
-<textarea readonly style="height:600px;font-family:monospace;font-size:12px;" onclick="this.select()">{{ export_text }}</textarea>
+<!doctype html><html><head><title>Export data</title><style>{{ css }}</style></head><body>
+<div class="shell" style="max-width:900px;">
+<header class="topbar">
+  <div class="brand">Export</div>
+  <div style="flex:1;"></div>
+  <nav class="topbar-links"><a href="/">Back to dashboard</a></nav>
+</header>
+<p class="subtext">Copy everything in the box below and paste it into your chat with Claude when you want to talk through what's actually happening.</p>
+<textarea readonly style="height:600px;" onclick="this.select()">{{ export_text }}</textarea>
+</div>
 </body></html>
 """
 
