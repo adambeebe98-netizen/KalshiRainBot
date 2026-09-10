@@ -47,7 +47,9 @@ Your job: find CONCRETE, EVIDENCE-BASED patterns in what's actually showing up i
 Not vague generalities like "the model could be improved" — specific, checkable observations \
 like "6 of the 8 losing trades on precipitation_daily had a rationale mentioning only forecast \
 data with no observation confirmation yet" or "temp_calibrated_aggressive's 3 losses all came \
-from markets where the forecast was within 2 degrees of the threshold boundary."
+from markets where the forecast was within 2 degrees of the threshold boundary." Each trade \
+includes the rules-extraction confidence level (high/medium/low) at decision time — worth \
+checking whether it actually tracks real outcomes here, not just assuming it does.
 
 Rules:
 - Only claim a pattern if the data actually shows it — cite roughly how many trades support \
@@ -68,10 +70,11 @@ def _format_trade(t: dict) -> str:
     pnl = t.get("pnl_cents") or 0
     prob = t.get("model_probability")
     prob_str = f"{prob:.2f}" if prob is not None else "n/a"
+    confidence = t.get("confidence") or "unknown"
     rationale = (t.get("rationale") or "(no rationale recorded)")[:200]
     return (f"- [{t['strategy']}] {t['ticker']} {t['side']} x{t['count']} @ {t['price_cents']}c "
-            f"-> {outcome} ({pnl:+d}c) | model_p={prob_str} | measure={t.get('measure')} "
-            f"station={t.get('station_code')} | \"{rationale}\"")
+            f"-> {outcome} ({pnl:+d}c) | model_p={prob_str} | confidence={confidence} | "
+            f"measure={t.get('measure')} station={t.get('station_code')} | \"{rationale}\"")
 
 
 def generate_retrospective() -> int | None:
