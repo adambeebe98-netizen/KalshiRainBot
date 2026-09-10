@@ -79,6 +79,30 @@ class TestMarkToMarket(unittest.TestCase):
         self.assertEqual(row["current_value_cents"], 0)
 
 
+class TestOpenPositionCount(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades", "trades")
+
+    def test_counts_only_open_shadow_positions_for_the_named_strategy(self):
+        storage.log_shadow_trade("calibrated_balanced", "T1", "yes", 10, 40)
+        storage.log_shadow_trade("calibrated_balanced", "T2", "yes", 10, 40)
+        tid3 = storage.log_shadow_trade("calibrated_balanced", "T3", "yes", 10, 40)
+        storage.settle_shadow_trade(tid3, won=True, pnl_cents=600)  # settled, should not count
+        storage.log_shadow_trade("calibrated_aggressive", "T4", "yes", 10, 40)  # different strategy
+
+        self.assertEqual(storage.get_open_shadow_position_count("calibrated_balanced"), 2)
+
+    def test_zero_for_a_strategy_with_no_trades(self):
+        self.assertEqual(storage.get_open_shadow_position_count("nonexistent"), 0)
+
+    def test_main_bot_version_counts_the_trades_table(self):
+        storage.log_trade("M1", "yes", 5, 50, "paper", None)
+        tid2 = storage.log_trade("M2", "yes", 5, 50, "paper", None)
+        storage.settle_trade(tid2, won=True, pnl_cents=250)
+        self.assertEqual(storage.get_open_position_count_main(), 1)
+
+
 class TestTodaysRealizedPnl(unittest.TestCase):
     def setUp(self):
         storage.init_db()
