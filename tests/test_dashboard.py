@@ -104,6 +104,30 @@ class TestOpenPositionsView(DashboardTestCase):
         self.assertIn("Showing the most recent", body)
 
 
+    def test_positions_grouped_by_strategy_with_busiest_first(self):
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)
+        storage.log_shadow_trade("swing", "T2", "yes", 5, 30)
+        storage.log_shadow_trade("calibrated_conservative", "T3", "yes", 15, 20)
+        body = _client().get("/").get_data(as_text=True)
+        swing_pos = body.find("swing")
+        calib_pos = body.find("calibrated_conservative")
+        self.assertNotEqual(swing_pos, -1)
+        self.assertNotEqual(calib_pos, -1)
+        self.assertLess(swing_pos, calib_pos, "the strategy with more open positions should list first")
+
+    def test_all_positions_and_reasoning_present_even_when_grouped(self):
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40, exit_target_cents=65,
+                                   rationale="forecast POP 65%")
+        storage.log_shadow_trade("calibrated_conservative", "T2", "yes", 15, 20,
+                                   rationale="station already recorded rain")
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("T1", body)
+        self.assertIn("T2", body)
+        self.assertIn("forecast POP 65%", body)
+        self.assertIn("sell at 65c", body)
+        self.assertIn("station already recorded rain", body)
+
+
 class TestSuggestionActions(DashboardTestCase):
     def test_apply_calls_set_override_and_clears_the_suggestion(self):
         sid = storage.log_suggestion("longshot", "min_price", 5, 4, "test rationale")
