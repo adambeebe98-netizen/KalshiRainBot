@@ -413,6 +413,41 @@ def get_todays_realized_pnl_cents_main() -> int:
         return row[0] or 0
 
 
+def get_open_shadow_position_count(strategy: str) -> int:
+    """
+    Real count of this strategy's currently-open positions, straight from
+    the database — the source of truth get_engines() should seed
+    RiskState.open_positions_count from, instead of the dataclass default
+    of 0.
+
+    CONFIRMED, SEVERE bug this fixes: open_positions_count is an in-memory
+    counter that only stayed correct as long as one continuous process
+    ran — every restart reset it to 0 regardless of how many real open
+    positions already existed, which means max_open_positions (the cap
+    approve_trade actually checks) never meaningfully bound in practice
+    on a bot restarted as often as this one has been during active
+    development. Confirmed directly: strategies showing 350-440+ "Active"
+    positions on the dashboard, far beyond any reasonable per-strategy cap,
+    with total deployed capital several times the paper bankroll — exactly
+    what you'd expect if the cap reset to "room for N more" on every
+    restart instead of reflecting what was actually already open.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM shadow_trades WHERE strategy=? AND status='open'",
+            (strategy,),
+        ).fetchone()
+        return row[0] or 0
+
+
+def get_open_position_count_main() -> int:
+    """Same idea as get_open_shadow_position_count(), for the main bot's
+    own real trades table."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()
+        return row[0] or 0
+
+
 def get_trades_for_retrospective(hours: int = 168, limit: int = 250) -> list[dict]:
     """
     Recent SETTLED shadow trades (both wins AND losses — a balanced sample,
