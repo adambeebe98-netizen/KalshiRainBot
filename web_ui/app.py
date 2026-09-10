@@ -254,6 +254,20 @@ details.position-row[open] > summary::before { content: "▾ "; }
 .position-detail { padding: 0 0 12px 16px; }
 .num-inline { font-size: 12.5px; margin: 0 0 6px; }
 .num-inline .num-label { color: var(--text-dim); font-weight: 500; }
+
+/* ---------- merged strategy performance + positions ---------- */
+details.position-group.rank-1 { border-color: rgba(56,189,203,0.35); }
+details.position-group > summary { flex-wrap: wrap; }
+.rank-num { color: var(--text-dim); font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+.strategy-name { font-weight: 500; margin-right: 2px; }
+.stat-strip {
+  display: flex; gap: 20px; flex-wrap: wrap; padding: 10px 0 14px;
+  border-bottom: 1px solid var(--border); margin-bottom: 8px;
+}
+.num-block { display: flex; flex-direction: column; gap: 1px; }
+.num-block .num-label { font-size: 10.5px; color: var(--text-dim); }
+.num-block .num-value { font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+.position-list-inner { display: flex; flex-direction: column; }
 .position-rationale { font-size: 12.5px; color: var(--text-dim); margin: 6px 0 0; font-style: italic; }
 
 /* ---------- tables ---------- */
@@ -350,65 +364,63 @@ DASHBOARD_PAGE = """
 
 <section class="hero">
   <div class="hero-head">
-    <h1>Open positions</h1>
+    <h1>Strategy performance</h1>
     <span class="count-badge">{{ open_positions_total }} open</span>
   </div>
-  <p class="subtext">What the bot is holding right now, grouped by strategy. Click a strategy to see its positions; click a position for the reasoning behind it.{% if open_positions_total > open_positions|length %} Showing the most recent {{ open_positions|length }} of {{ open_positions_total }}.{% endif %}</p>
-  <div class="position-groups">
-    {% for strat, positions in positions_by_strategy.items() %}
-    <details class="sub position-group">
-      <summary>{{ strat }} <span class="count-badge">{{ positions|length }}</span></summary>
+  <p class="subtext">All paper — none of these place real orders. Click a strategy for its current positions and the reasoning behind each one.{% if open_positions_total > open_positions|length %} (showing the most recent {{ open_positions|length }} of {{ open_positions_total }} open positions across all strategies){% endif %}</p>
+  <canvas id="strategyChart" height="90"></canvas>
+  <div class="position-groups" style="margin-top:16px;">
+    {% for s in shadow_summary %}
+    <details class="sub position-group {{ 'rank-1' if s.rank == 1 and s.enough_data else '' }}">
+      <summary>
+        <span class="rank-num">#{{ s.rank }}</span>
+        <span class="strategy-name">{{ s.strategy }}</span>
+        {% if s.dampened %}<span class="tag dampened">cooling off</span>{% endif %}
+        <span class="num {{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</span>
+        <span class="num">{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }} win</span>
+        <span class="num {{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">${{ "%.2f"|format((s.total_pnl_cents or 0)/100) }} total</span>
+        <span class="count-badge">{{ s.open }} active</span>
+      </summary>
       <div class="sub-body">
-        {% for p in positions %}
-        <details class="position-row">
-          <summary>
-            <span class="ticker">{{ p.ticker }}</span>
-            <span class="tag side-{{ p.side }}">{{ p.side }}</span>
-            <span class="num">{{ p.price_cents }}c → {{ p.current_price_cents }}c</span>
-            <span class="num">×{{ p.count }}</span>
-            <span class="num {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
-          </summary>
-          <div class="position-detail">
-            {% if p.exit_target_cents %}<p class="num-inline"><span class="num-label">Goal:</span> sell at {{ p.exit_target_cents }}c</p>{% endif %}
-            {% if p.confidence %}<p class="num-inline"><span class="num-label">Confidence:</span> {{ p.confidence }}</p>{% endif %}
-            {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
-          </div>
-        </details>
-        {% endfor %}
+        {% if not s.enough_data %}
+        <p class="warn-text" style="font-size:12px;margin:0 0 10px;">Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.</p>
+        {% endif %}
+        <div class="stat-strip">
+          <div class="num-block"><span class="num-label">Bankroll</span><span class="num-value">${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</span></div>
+          <div class="num-block"><span class="num-label">Deployed</span><span class="num-value">${{ "%.2f"|format((s.open_capital_cents or 0)/100) }}</span></div>
+          <div class="num-block"><span class="num-label">Current value</span><span class="num-value">${{ "%.2f"|format((s.current_value_cents or 0)/100) }}</span></div>
+          <div class="num-block"><span class="num-label">Unrealized</span><span class="num-value {{ 'ok' if (s.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((s.unrealized_pnl_cents or 0)/100) }}</span></div>
+          <div class="num-block"><span class="num-label">Settled</span><span class="num-value">{{ s.settled }}</span></div>
+          <div class="num-block"><span class="num-label">Days tracked</span><span class="num-value">{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</span></div>
+        </div>
+        {% set positions = positions_by_strategy.get(s.strategy, []) %}
+        {% if positions %}
+        <div class="position-list-inner">
+          {% for p in positions %}
+          <details class="position-row">
+            <summary>
+              <span class="ticker">{{ p.ticker }}</span>
+              <span class="tag side-{{ p.side }}">{{ p.side }}</span>
+              <span class="num">{{ p.price_cents }}c → {{ p.current_price_cents }}c</span>
+              <span class="num">×{{ p.count }}</span>
+              <span class="num {{ 'ok' if (p.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((p.unrealized_pnl_cents or 0)/100) }}</span>
+            </summary>
+            <div class="position-detail">
+              {% if p.exit_target_cents %}<p class="num-inline"><span class="num-label">Goal:</span> sell at {{ p.exit_target_cents }}c</p>{% endif %}
+              {% if p.confidence %}<p class="num-inline"><span class="num-label">Confidence:</span> {{ p.confidence }}</p>{% endif %}
+              {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
+            </div>
+          </details>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-state" style="padding:8px 0;">No open positions for this strategy right now.</p>
+        {% endif %}
       </div>
     </details>
     {% endfor %}
-    {% if not positions_by_strategy %}<p class="empty-state">No open positions right now.</p>{% endif %}
+    {% if not shadow_summary %}<p class="empty-state">No shadow strategy data yet — give it a few scan cycles.</p>{% endif %}
   </div>
-</section>
-
-<section class="panel">
-  <h2>Strategy performance</h2>
-  <p class="subtext">All paper — none of these place real orders.</p>
-  <canvas id="strategyChart" height="90"></canvas>
-  <table class="data-table" style="margin-top:16px;">
-    <tr><th>#</th><th>Strategy</th><th>Bankroll</th><th>ROI</th><th>Active</th><th>Deployed</th><th>Current value</th><th>Unrealized</th><th>Settled</th><th>Win rate</th><th>Total P&L</th><th>Days</th></tr>
-    {% for s in shadow_summary %}
-    <tr class="{{ 'rank-1' if s.rank == 1 and s.enough_data else '' }}">
-      <td>{{ s.rank }}</td>
-      <td>{{ s.strategy }}{% if s.dampened %} <span class="tag dampened">cooling off</span>{% endif %}</td>
-      <td>${{ "%.2f"|format((s.bankroll_cents or 0)/100) }}</td>
-      <td class="{{ 'ok' if (s.roi_pct or 0) >= 0 else 'err' }}">{{ "%+.1f%%"|format(s.roi_pct) if s.roi_pct is not none else "—" }}</td>
-      <td>{{ s.open }}</td>
-      <td>${{ "%.2f"|format((s.open_capital_cents or 0)/100) }}</td>
-      <td>${{ "%.2f"|format((s.current_value_cents or 0)/100) }}</td>
-      <td class="{{ 'ok' if (s.unrealized_pnl_cents or 0) >= 0 else 'err' }}">{{ "%+.2f"|format((s.unrealized_pnl_cents or 0)/100) }}</td>
-      <td>{{ s.settled }}</td>
-      <td>{{ "%.0f%%"|format(s.win_rate*100) if s.win_rate is not none else "—" }}</td>
-      <td class="{{ 'ok' if (s.total_pnl_cents or 0) >= 0 else 'err' }}">{{ "%.2f"|format((s.total_pnl_cents or 0)/100) }}</td>
-      <td>{{ "%.0f"|format(s.days_tracked) if s.days_tracked is not none else "—" }}</td>
-    </tr>
-    {% if not s.enough_data %}
-    <tr><td></td><td colspan="11" class="warn-text" style="font-size:12px;">Only {{ s.settled }}/{{ min_sample_size }} settled trades — could easily be a streak, not skill yet.</td></tr>
-    {% endif %}
-    {% endfor %}
-    {% if not shadow_summary %}<tr><td colspan="12">No shadow strategy data yet — give it a few scan cycles.</td></tr>{% endif %}
-  </table>
 </section>
 
 <section class="panel">
@@ -767,18 +779,13 @@ def dashboard():
         confidence_breakdown = storage.get_win_rate_by_confidence()
         open_positions = storage.get_open_positions_detail()
         open_positions_total = storage.get_open_shadow_position_total_count()
-        # Grouped by strategy for the dashboard's collapsible view — a flat
-        # list of every open position becomes an unmanageable scroll past a
-        # handful of trades, so this chunks it into one dropdown per
-        # strategy (busiest first), with each individual position itself
-        # collapsed to a one-line summary until clicked open for the
-        # reasoning behind it.
+        # Grouped by strategy so each strategy's row in the performance
+        # table can expand to show its own open positions — merged into
+        # one place instead of two separate sections that both organized
+        # around "per strategy" and repeated the same names.
         positions_by_strategy: dict[str, list[dict]] = {}
         for p in open_positions:
             positions_by_strategy.setdefault(p["strategy"], []).append(p)
-        positions_by_strategy = dict(
-            sorted(positions_by_strategy.items(), key=lambda kv: len(kv[1]), reverse=True)
-        )
     except Exception:
         pass  # shadow tables may not exist yet on a very first run
 
