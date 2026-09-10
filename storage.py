@@ -613,6 +613,21 @@ def _mark_open_positions_to_market(conn, strategy: str) -> tuple[int, int]:
     return current_value, cost_basis
 
 
+def get_open_shadow_position_total_count() -> int:
+    """
+    The REAL total count of open positions across every strategy combined
+    — unlimited, unlike get_open_positions_detail()'s necessarily-capped
+    list (that one exists to render a bounded number of position cards on
+    the dashboard, not to answer "how many are there really"). The
+    dashboard's "N open" badge must use THIS, not the length of the
+    (possibly truncated) detail list, or a real count above the detail
+    limit would silently display as if it were the true total.
+    """
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM shadow_trades WHERE status='open'").fetchone()
+        return row[0] or 0
+
+
 def get_open_positions_detail(limit: int = 300) -> list[dict]:
     """
     Every currently open position, individually — not aggregated by
