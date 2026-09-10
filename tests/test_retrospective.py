@@ -137,7 +137,7 @@ class TestFormatTrade(unittest.TestCase):
         trade = {
             "strategy": "calibrated_balanced", "ticker": "T1", "side": "yes", "count": 10,
             "price_cents": 40, "status": "lost", "pnl_cents": -400, "model_probability": 0.7,
-            "measure": "precipitation_daily", "station_code": "KAUS",
+            "measure": "precipitation_daily", "station_code": "KAUS", "confidence": "high",
             "rationale": "forecast only, no observation data",
         }
         formatted = retrospective._format_trade(trade)
@@ -146,16 +146,18 @@ class TestFormatTrade(unittest.TestCase):
         self.assertIn("LOST", formatted)
         self.assertIn("-400c", formatted)
         self.assertIn("forecast only", formatted)
+        self.assertIn("confidence=high", formatted)
 
-    def test_handles_missing_rationale_gracefully(self):
+    def test_handles_missing_rationale_and_confidence_gracefully(self):
         trade = {
             "strategy": "arbitrage", "ticker": "T2", "side": "both", "count": 5,
             "price_cents": 90, "status": "won", "pnl_cents": 50, "model_probability": None,
-            "measure": None, "station_code": None, "rationale": None,
+            "measure": None, "station_code": None, "rationale": None, "confidence": None,
         }
         formatted = retrospective._format_trade(trade)
         self.assertIn("no rationale recorded", formatted)
         self.assertIn("n/a", formatted)  # model_probability
+        self.assertIn("confidence=unknown", formatted)
 
 
 if __name__ == "__main__":
