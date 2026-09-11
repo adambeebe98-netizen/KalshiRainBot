@@ -194,6 +194,18 @@ STRATEGIES = {
     "temp_settlement_window": {"kind": "settlement_window", "risk": "balanced",
                                  "category_filter": "Temperature", "measure_filter": "temperature_high",
                                  "max_hours_until_close": 3.0},
+    # DEPTH IMBALANCE — a genuinely different signal SOURCE, not another
+    # spin on forecast-vs-market-price: heavy resting order-book depth on
+    # one side relative to the other, independent of what the weather
+    # model thinks. min_edge_cents_override=0 for the same reason
+    # favorites_baseline needs it — this never claims a probability-based
+    # edge, so the normal min-edge gate would reject every candidate
+    # outright. max_price_override=99 for the same reason too: a real
+    # imbalance can show up at any price, not just within the standard
+    # 2-90c band other strategies assume.
+    "depth_imbalance": {"kind": "depth_imbalance", "risk": "conservative",
+                         "min_edge_cents_override": 0, "max_price_override": 99,
+                         "min_total_depth": 20, "min_imbalance_ratio": 3.0},
     # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
     # (e.g. every temperature bucket for one city/day), buys the side (all
     # NO, or rarely all YES) whose combined price guarantees a profit no
@@ -417,6 +429,20 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
             model_prob = signal.model_probability_yes
 
+        elif kind == "depth_imbalance":
+            # Deliberately independent of the weather model entirely —
+            # see strategies_lib.depth_imbalance_candidate's docstring for
+            # the full reasoning. A genuinely different signal SOURCE from
+            # every other strategy here, not just a different threshold on
+            # the same one — real diversification, not just more spins on
+            # forecast-vs-market-price.
+            candidate = lib.depth_imbalance_candidate(
+                yes_ask, no_ask, yes_bids, no_bids,
+                min_total_depth=cfg.get("min_total_depth", 20),
+                min_imbalance_ratio=cfg.get("min_imbalance_ratio", 3.0),
+            )
+            model_prob = None
+
         elif kind == "arbitrage":
             candidate = lib.arbitrage_candidate(yes_ask, no_ask)
             if candidate:
@@ -517,14 +543,28 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         if not candidate:
             continue
 
-        # always_trade doesn't claim any real edge to check fees against in
-        # the first place (see its branch above) — edge_already_net_of_fees
-        # is being reused here to skip that check entirely, not because
-        # fees were actually computed, but because "does 0 edge survive
-        # fees" is a nonsensical question for a strategy that isn't making
-        # an edge claim at all.
+        # always_trade/favorites/depth_imbalance don't claim any real edge
+        # to check fees against in the first place (all three use
+        # edge_cents=0 by design — no probability model backs a number to
+        # test against fees). edge_already_net_of_fees is being reused
+        # here to skip that check entirely, not because fees were actually
+        # computed, but because "does 0 edge survive fees" is a
+        # nonsensical question for a strategy that isn't making an edge
+        # claim at all.
+        #
+        # CONFIRMED BUG this fixes: this exemption only ever covered
+        # always_trade. favorites_baseline has the identical edge_cents=0
+        # pattern and was NEVER exempted — meaning gross_expected_cents
+        # (0 * contracts) minus any positive fee is always <= 0, so
+        # approve_trade's fee-survival check silently rejected EVERY
+        # favorites_baseline candidate it ever found, unconditionally,
+        # regardless of min_edge_cents_override=0. Not "conditions rarely
+        # arose" — structurally impossible to ever pass. Confirmed
+        # directly while building depth_imbalance, which shares the same
+        # edge_cents=0 pattern and would have had the identical bug.
+        no_real_edge_claim = kind in ("always_trade", "favorites", "depth_imbalance")
         approved, reason = rm.approve_trade(candidate.price_cents, candidate.edge_cents,
-                                             edge_already_net_of_fees=(kind == "always_trade"))
+                                             edge_already_net_of_fees=no_real_edge_claim)
         if not approved:
             continue
 
