@@ -221,6 +221,14 @@ STRATEGIES = {
     # to calibrated_balanced: if avoiding wide-spread/thin-liquidity
     # markets actually improves outcomes, this shows it against real data.
     "tight_spread_calibrated": {"kind": "tight_spread_calibrated", "risk": "balanced", "max_spread_cents": 5},
+    # CONFIRMED SIGNAL — trades only when the calibrated weather model
+    # and pure order-book depth (two genuinely independent signal
+    # sources) agree on direction. Can only ever reduce trade frequency
+    # relative to calibrated_balanced, never increase it, since it adds
+    # a requirement on top of the same edge/side calibrated_balanced
+    # already needs.
+    "confirmed_signal": {"kind": "confirmed_signal", "risk": "balanced",
+                          "min_total_depth": 20, "min_imbalance_ratio": 3.0},
     # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
     # (e.g. every temperature bucket for one city/day), buys the side (all
     # NO, or rarely all YES) whose combined price guarantees a profit no
@@ -404,7 +412,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         if kind in ("calibrated", "calibrated_confidence_weighted"):
             if not signal:
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
@@ -425,7 +433,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             )
             if not trusted:
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents,
@@ -451,11 +459,43 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             spread = yes_ask - yes_bid
             if spread < 0 or spread > cfg.get("max_spread_cents", 5):
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents,
                                                f"{signal.rationale}; spread={spread}c (tight market)")
+            model_prob = signal.model_probability_yes
+
+        elif kind == "confirmed_signal":
+            # Two genuinely INDEPENDENT signals — the calibrated weather
+            # model, and pure order-book depth (see
+            # strategies_lib.book_imbalance_side) — required to point the
+            # SAME direction before trading either alone. This is a
+            # confirmation filter, not a third probability model: it can
+            # only ever reduce this strategy's trade frequency relative to
+            # calibrated_balanced, never increase it, since it adds a
+            # requirement on top of the same edge/side calibrated_balanced
+            # already needs. If requiring agreement between two
+            # independent signal sources measurably improves win rate
+            # over calibrated_balanced alone, that's real evidence
+            # confirmation is worth something; if it doesn't, that's a
+            # real finding too — either way this needs its own bucket to
+            # find out, not mixed into calibrated_balanced's numbers.
+            if not signal:
+                continue
+            book_side = lib.book_imbalance_side(
+                yes_bids, no_bids,
+                min_total_depth=cfg.get("min_total_depth", 20),
+                min_imbalance_ratio=cfg.get("min_imbalance_ratio", 3.0),
+            )
+            if book_side is None or book_side != signal.side:
+                continue
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
+            if price is None:
+                continue
+            candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents,
+                                               f"{signal.rationale}; confirmed by order-book depth "
+                                               f"(both point {signal.side})")
             model_prob = signal.model_probability_yes
 
         elif kind == "forecast_momentum":
@@ -464,7 +504,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             shift = abs(current_forecast_temp_f - previous_forecast_temp_f)
             if shift < cfg.get("forecast_shift_threshold_f", 3.0):
                 continue  # nothing moved enough this cycle to be "momentum," not just noise
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
@@ -486,7 +526,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             if (not signal or hours_until_close is None
                     or hours_until_close > cfg.get("max_hours_until_close", 3.0)):
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
@@ -559,7 +599,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         elif kind == "longshot":
             if not signal:
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None:
                 continue
             candidate = lib.longshot_candidate(signal, price, cfg.get("min_price", 2), cfg.get("max_price", 15))
@@ -568,7 +608,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         elif kind == "swing":
             if not signal:
                 continue
-            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
             if price is None or price > cfg.get("entry_max", 40):
                 continue
             # Still requires the calibrated model to see SOME edge — this
@@ -664,8 +704,26 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             ask_levels = lib_depth.implied_ask_levels(opposite_bids)
 
             if model_prob is not None:
+                # CONFIRMED SEVERE BUG this fixes: model_prob is always
+                # signal.model_probability_yes (the probability of YES),
+                # but find_max_profitable_size computes
+                # expected_value_cents = model_probability*100 - price,
+                # which needs the probability that the SIDE BEING BOUGHT
+                # wins — for a "no" trade that's 1-model_prob, not
+                # model_prob itself. Passing model_probability_yes
+                # unconditionally meant every "no" trade with real book
+                # data available got evaluated against the WRONG
+                # probability (e.g. a 90%-confident "no" bet, where
+                # model_probability_yes=0.10, was evaluated as if it only
+                # had a 10% chance of winning) — silently making almost
+                # every genuinely profitable "no" trade look wildly
+                # unprofitable and get rejected here, for as long as
+                # depth-aware sizing has existed. "yes" trades were never
+                # affected, since model_prob already IS the right number
+                # for that side.
+                side_win_probability = model_prob if candidate.side == "yes" else 1 - model_prob
                 fill = lib_depth.find_max_profitable_size(
-                    ask_levels, fees.taker_fee_cents, model_prob,
+                    ask_levels, fees.taker_fee_cents, side_win_probability,
                     max_contracts_cap=contracts, min_net_edge_cents=rm.preset.min_edge_cents,
                     max_slippage_cents=rm.preset.max_slippage_cents,
                 )
