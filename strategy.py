@@ -47,10 +47,14 @@ class TradeSignal:
     rationale: str
 
 
+RAIN_NEAR_CLOSE_WINDOW_HOURS = 6.0
+
+
 def estimate_precip_probability(
     observation: Optional[StationObservation],
     forecast: list[PrecipForecast],
     trace_counts_as_zero: Optional[bool],
+    hours_until_close: Optional[float] = None,
 ) -> tuple[float, str, bool]:
     """Returns (probability measurable precip occurs, human-readable rationale,
     has_real_signal). has_real_signal=False means the 0.5 returned is a
@@ -62,7 +66,23 @@ def estimate_precip_probability(
     it's actually zero real information dressed up as a strong signal —
     confirmed live: KXHIGHNY-26SEP10-B91.5 traded on exactly this pattern,
     "no forecast temperature available" yet a nominal ~48c "edge" against
-    a 2c market)."""
+    a 2c market).
+
+    hours_until_close, when provided AND no measurable precip has occurred
+    yet, decays the forecast POP toward zero as settlement approaches:
+    a "40% chance of rain today" forecast issued that morning already
+    reflects the whole day's window, so by evening, with nothing observed
+    yet, the REMAINING chance in whatever's left of the window is lower
+    than the original all-day figure, not still flatly 40%. This is a
+    simple, deliberately conservative linear decay — not a rigorous
+    hazard-rate model of how POP actually distributes across a day (which
+    would need per-period POP granularity this codebase doesn't have) —
+    documented as a heuristic, same rigor level as the analogous
+    near-close blending in estimate_temperature_probability. Never
+    applied once precip has already been observed (already_measurable
+    short-circuits before this ever runs) — there's nothing to "decay,"
+    the outcome is already effectively decided.
+    """
     notes = []
 
     # Already-observed precipitation this hour/3hr strongly predicts a "yes"
@@ -93,6 +113,12 @@ def estimate_precip_probability(
         # POP is not literally "probability of >0 inches at this exact station,"
         # it's probability of measurable precip somewhere in the forecast area —
         # treat it as a noisy proxy, not ground truth, hence no further inflation.
+        if hours_until_close is not None and 0 <= hours_until_close <= RAIN_NEAR_CLOSE_WINDOW_HOURS:
+            remaining_fraction = hours_until_close / RAIN_NEAR_CLOSE_WINDOW_HOURS
+            decayed_pop = max_pop * remaining_fraction
+            notes.append(f"within {hours_until_close:.1f}h of close with no rain yet, decayed "
+                         f"toward {decayed_pop:.2f} (remaining-window heuristic)")
+            return decayed_pop, "; ".join(notes), True
         return max_pop, "; ".join(notes), True
 
     notes.append("no observation or forecast data available")
@@ -307,9 +333,10 @@ def evaluate_market(
     rules: MarketRules,
     observation: Optional[StationObservation],
     forecast: list[PrecipForecast],
+    hours_until_close: Optional[float] = None,
 ) -> TradeSignal:
     raw_model_p, rationale, has_real_signal = estimate_precip_probability(
-        observation, forecast, rules.trace_counts_as_zero
+        observation, forecast, rules.trace_counts_as_zero, hours_until_close=hours_until_close
     )
 
     if not has_real_signal:
