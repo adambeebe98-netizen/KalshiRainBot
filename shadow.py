@@ -194,6 +194,21 @@ STRATEGIES = {
     "temp_settlement_window": {"kind": "settlement_window", "risk": "balanced",
                                  "category_filter": "Temperature", "measure_filter": "temperature_high",
                                  "max_hours_until_close": 3.0},
+    # RAIN SETTLEMENT WINDOW — same "settlement_window" kind as
+    # temp_settlement_window, just measure_filter'd to precipitation_daily
+    # instead of temperature_high. Needs zero new dispatch logic: bot.py
+    # already passes hours_until_close unconditionally to
+    # evaluate_and_log for every measure, and strategy.py's rain model
+    # already applies its own near-close decay specifically for
+    # precipitation_daily (see estimate_precip_probability's docstring).
+    # Isolated into its own strategy for the same reason as its
+    # temperature counterpart: lets retrospective and the confidence/edge
+    # analytics check whether "near-close rain trades are more reliable"
+    # holds up against real outcomes, separate from calibrated_balanced's
+    # blended numbers across every hour of the day.
+    "rain_settlement_window": {"kind": "settlement_window", "risk": "balanced",
+                                "category_filter": "Rain", "measure_filter": "precipitation_daily",
+                                "max_hours_until_close": 3.0},
     # DEPTH IMBALANCE — a genuinely different signal SOURCE, not another
     # spin on forecast-vs-market-price: heavy resting order-book depth on
     # one side relative to the other, independent of what the weather
