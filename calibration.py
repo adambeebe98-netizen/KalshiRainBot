@@ -50,6 +50,43 @@ def get_bias(station_code: str | None, measure: str | None) -> tuple[float, str]
     )
 
 
+def is_trusted(station_code: str | None, measure: str | None,
+                max_bias_for_trust: float = 0.05) -> tuple[bool, str]:
+    """
+    Different question from get_bias(): not "how much should we correct
+    the raw estimate" but "has this station/measure's raw estimate
+    already been empirically demonstrated as well-aligned, with enough
+    real data to say so." Used by shadow.py's calibration_trusted
+    strategy — a strategy that ONLY trades where the model's track record
+    at THIS specific station/measure is directly verified, rather than
+    trusting the model everywhere uniformly the way calibrated_* does
+    (those apply the SAME learned correction, but still trade regardless
+    of whether that correction is based on 20 samples or 2000, or on a
+    bias that's nearly zero versus one already at MAX_BIAS_ADJUSTMENT).
+
+    Deliberately uses the RAW (unclamped) bias for the trust check, not
+    get_bias()'s clamped return value — a raw bias of 0.30 that gets
+    clamped to 0.20 for the correction itself should still count as "not
+    yet trustworthy," not accidentally pass a 0.05 threshold check against
+    the clamped number.
+    """
+    if not station_code or not measure:
+        return False, "no station/measure on file"
+
+    n, avg_predicted, avg_actual = storage.get_calibration_stats(station_code, measure)
+    if n < MIN_SAMPLES_FOR_CALIBRATION:
+        return False, f"only {n} settled samples for {station_code}/{measure} (need {MIN_SAMPLES_FOR_CALIBRATION})"
+
+    raw_bias = avg_actual - avg_predicted
+    if abs(raw_bias) > max_bias_for_trust:
+        return False, (f"{station_code}/{measure}: n={n}, bias {raw_bias:+.2f} exceeds the "
+                        f"{max_bias_for_trust:.2f} trust threshold — real data, but the raw model "
+                        f"isn't well-aligned here yet")
+
+    return True, (f"{station_code}/{measure}: n={n}, bias {raw_bias:+.2f} is within the "
+                   f"{max_bias_for_trust:.2f} trust threshold — model empirically verified here")
+
+
 def apply_calibration(raw_probability: float, station_code: str | None, measure: str | None) -> tuple[float, str]:
     bias, note = get_bias(station_code, measure)
     adjusted = max(0.01, min(0.99, raw_probability + bias))
