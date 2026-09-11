@@ -232,6 +232,38 @@ class TestTodaysRealizedPnl(unittest.TestCase):
         self.assertEqual(storage.get_todays_realized_pnl_cents_main(), -250)
 
 
+class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
+    """Some strategies (depth_imbalance, confirmed_signal) have no fixed
+    category_filter and trade both Rain and Temperature depending on
+    whichever ticker triggered them. Category classification happens
+    PER-TRADE via that trade's own real measure value, not per-strategy —
+    this confirms a single cross-category strategy's trades correctly
+    split across both categories rather than getting lumped into one."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_a_single_strategys_trades_split_correctly_by_real_measure(self):
+        tid_rain = storage.log_shadow_trade("depth_imbalance", "T1", "yes", 10, 40,
+                                              measure="precipitation_daily")
+        storage.settle_shadow_trade(tid_rain, won=True, pnl_cents=600)
+        tid_temp = storage.log_shadow_trade("depth_imbalance", "T2", "yes", 10, 40,
+                                              measure="temperature_high")
+        storage.settle_shadow_trade(tid_temp, won=False, pnl_cents=-400)
+
+        breakdown = storage.get_shadow_summary_by_category()
+        rain_strategies = [s["strategy"] for s in breakdown["Rain"]["strategies"]]
+        temp_strategies = [s["strategy"] for s in breakdown["Temperature"]["strategies"]]
+        self.assertIn("depth_imbalance", rain_strategies)
+        self.assertIn("depth_imbalance", temp_strategies)
+
+        rain_row = next(s for s in breakdown["Rain"]["strategies"] if s["strategy"] == "depth_imbalance")
+        temp_row = next(s for s in breakdown["Temperature"]["strategies"] if s["strategy"] == "depth_imbalance")
+        self.assertEqual(rain_row["settled"], 1)
+        self.assertEqual(temp_row["settled"], 1)
+
+
 class TestShadowSummaryExclusions(unittest.TestCase):
     def setUp(self):
         storage.init_db()
