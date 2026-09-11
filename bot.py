@@ -334,7 +334,20 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                           "bracket arbitrage or precipitation_monthly, neither of which "
                                           "depend on near-term forecast accuracy", mode)
                     continue
-                signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
+                signal = evaluate_market(
+                    ticker, yes_price, rules, observation, forecast,
+                    # Same scoping care as temperature_high/temperature_low:
+                    # the near-close decay in estimate_precip_probability
+                    # assumes hours_until_close reflects a same-day
+                    # settlement window. For precipitation_monthly, close
+                    # is weeks away except in the literal final hours of
+                    # the month — and even then, "no rain in the last hour"
+                    # says nothing about whether the MONTH's cumulative
+                    # threshold was already cleared by rain earlier in the
+                    # month. Only pass it through for precipitation_daily.
+                    hours_until_close=(hours_until_close(market.get("close_time"))
+                                        if rules.measure == "precipitation_daily" else None),
+                )
                 current_forecast_temp_f = previous_forecast_temp_f = None
             elif rules.measure in ("temperature_high", "temperature_low"):
                 signal = evaluate_temperature_market(ticker, yes_price, rules, observation, forecast,
