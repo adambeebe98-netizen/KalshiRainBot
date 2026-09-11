@@ -206,6 +206,21 @@ STRATEGIES = {
     "depth_imbalance": {"kind": "depth_imbalance", "risk": "conservative",
                          "min_edge_cents_override": 0, "max_price_override": 99,
                          "min_total_depth": 20, "min_imbalance_ratio": 3.0},
+    # CALIBRATION TRUSTED — trades only where the raw model has been
+    # directly, empirically verified as well-aligned at that specific
+    # station/measure (real settled data, small measured bias), rather
+    # than trusting the model uniformly everywhere the way calibrated_*
+    # does. Isolated into its own strategy so it's directly comparable to
+    # calibrated_balanced: if this one's win rate is meaningfully better,
+    # that's real evidence the trust-gating is worth something; if not,
+    # that's a real finding too.
+    "calibration_trusted": {"kind": "calibration_trusted", "risk": "balanced", "max_bias_for_trust": 0.05},
+    # TIGHT SPREAD CALIBRATED — same calibrated model as calibrated_balanced,
+    # gated on real market-quality (a tight bid-ask spread), not a
+    # different probability model. Isolated so it's directly comparable
+    # to calibrated_balanced: if avoiding wide-spread/thin-liquidity
+    # markets actually improves outcomes, this shows it against real data.
+    "tight_spread_calibrated": {"kind": "tight_spread_calibrated", "risk": "balanced", "max_spread_cents": 5},
     # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
     # (e.g. every temperature bucket for one city/day), buys the side (all
     # NO, or rarely all YES) whose combined price guarantees a profit no
@@ -393,6 +408,54 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
+            model_prob = signal.model_probability_yes
+
+        elif kind == "calibration_trusted":
+            # Different question from the calibrated_* strategies: those
+            # apply the SAME learned correction everywhere and trade
+            # regardless of whether it's backed by 20 samples or 2000, or
+            # a bias near zero versus one already at its clamp ceiling.
+            # This one only trades where the raw model has been directly,
+            # empirically verified as well-aligned at THIS specific
+            # station/measure — see calibration.is_trusted's docstring.
+            if not signal:
+                continue
+            trusted, trust_note = calibration.is_trusted(
+                station_code, measure, max_bias_for_trust=cfg.get("max_bias_for_trust", 0.05)
+            )
+            if not trusted:
+                continue
+            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            if price is None:
+                continue
+            candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents,
+                                               f"{signal.rationale}; trust check: {trust_note}")
+            model_prob = signal.model_probability_yes
+
+        elif kind == "tight_spread_calibrated":
+            # Same calibrated model and edge as calibrated_balanced, but
+            # gated on the bid-ask spread being tight — a real market-
+            # quality filter, not a different probability model. A wide
+            # spread on a thin book means the quoted price may not
+            # reflect genuine price discovery yet; this only trades where
+            # the market itself is actively agreeing on a price. Uses the
+            # YES-side spread as a proxy for the whole market's liquidity
+            # regardless of which side gets traded — Kalshi's yes/no books
+            # are mechanically linked (buying NO is the same trade as
+            # selling YES), so a tight YES spread reflects a genuinely
+            # liquid market either way. A negative spread (crossed/bad
+            # quote data) fails closed rather than being treated as
+            # "very tight."
+            if not signal or yes_bid is None or yes_ask is None:
+                continue
+            spread = yes_ask - yes_bid
+            if spread < 0 or spread > cfg.get("max_spread_cents", 5):
+                continue
+            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            if price is None:
+                continue
+            candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents,
+                                               f"{signal.rationale}; spread={spread}c (tight market)")
             model_prob = signal.model_probability_yes
 
         elif kind == "forecast_momentum":
