@@ -84,3 +84,57 @@ def longshot_candidate(signal: Optional[TradeSignal], price_cents: int,
         side=signal.side, price_cents=price_cents, edge_cents=signal.edge_cents,
         rationale=f"longshot: {signal.rationale} [price {price_cents}c in band {min_price}-{max_price}c]",
     )
+
+
+def depth_imbalance_candidate(
+    yes_ask: Optional[int], no_ask: Optional[int],
+    yes_bids: Optional[list[tuple[int, int]]], no_bids: Optional[list[tuple[int, int]]],
+    min_total_depth: int = 20, min_imbalance_ratio: float = 3.0,
+) -> Optional[StrategyCandidate]:
+    """
+    A pure market-microstructure signal, deliberately independent of the
+    weather model entirely: heavy resting buy-side depth on one side of
+    the book relative to the other can reflect informed positioning, in
+    the same direction limit-order-book imbalance is commonly used as a
+    short-term price predictor in market microstructure research. Trades
+    WITH the imbalance (the side with more resting depth), crossing the
+    spread at that side's current ask to actually enter, same as every
+    other directional strategy here.
+
+    Requires BOTH sides' real depth data to be present — fails CLOSED,
+    not open, on missing data. That's a genuinely different posture from
+    most strategies here, since without real numbers on both sides
+    there's no signal to compute at all, not just a less-good one.
+
+    min_total_depth guards against a thin, quiet book producing a
+    meaningless ratio from tiny absolute numbers (5 contracts vs 1 is a
+    "5x imbalance" that means nothing on an illiquid market).
+    min_imbalance_ratio is how lopsided the two sides need to be before
+    this counts as a real signal rather than ordinary noise.
+    """
+    if not yes_bids or not no_bids:
+        return None
+    yes_depth = sum(size for _, size in yes_bids)
+    no_depth = sum(size for _, size in no_bids)
+    if yes_depth + no_depth < min_total_depth:
+        return None
+    if yes_depth == 0 or no_depth == 0:
+        # A truly empty side is more likely just unquoted right now than a
+        # genuine, tradeable imbalance signal.
+        return None
+
+    if yes_depth >= no_depth * min_imbalance_ratio:
+        side, price = "yes", yes_ask
+    elif no_depth >= yes_depth * min_imbalance_ratio:
+        side, price = "no", no_ask
+    else:
+        return None  # not lopsided enough to count as a real signal
+
+    if price is None:
+        return None
+    return StrategyCandidate(
+        side=side, price_cents=price, edge_cents=0,
+        rationale=f"depth imbalance: yes_bid_depth={yes_depth} no_bid_depth={no_depth} "
+                  f"({side}-heavy, ratio >= {min_imbalance_ratio}x) — pure order-book signal, "
+                  f"no probability model used",
+    )
