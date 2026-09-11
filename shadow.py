@@ -183,6 +183,17 @@ STRATEGIES = {
     # yet," not a separate probability model of its own.
     "temp_forecast_momentum": {"kind": "forecast_momentum", "risk": "balanced",
                                  "category_filter": "Temperature", "forecast_shift_threshold_f": 3.0},
+    # SETTLEMENT WINDOW — trades ONLY in the last few hours before a
+    # temperature_high market closes, on the strength of strategy.py's
+    # near-close observation blending. measure_filter (not just
+    # category_filter) matters here specifically: "Temperature" alone
+    # would also let temperature_low markets through, and a daily low's
+    # afternoon observation has no relationship to its overnight
+    # settlement — see strategy.estimate_temperature_probability's
+    # docstring for the full reasoning this strategy leans on.
+    "temp_settlement_window": {"kind": "settlement_window", "risk": "balanced",
+                                 "category_filter": "Temperature", "measure_filter": "temperature_high",
+                                 "max_hours_until_close": 3.0},
     # BRACKET ARBITRAGE — for a full set of mutually-exclusive brackets
     # (e.g. every temperature bucket for one city/day), buys the side (all
     # NO, or rarely all YES) whose combined price guarantees a profit no
@@ -290,7 +301,9 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                       current_forecast_temp_f: Optional[float] = None,
                       previous_forecast_temp_f: Optional[float] = None,
                       yes_bids: Optional[list[tuple[int, int]]] = None,
-                      no_bids: Optional[list[tuple[int, int]]] = None) -> None:
+                      no_bids: Optional[list[tuple[int, int]]] = None,
+                      hours_until_close: Optional[float] = None,
+                      yes_bid: Optional[int] = None) -> None:
     """Called once per scanned market per cycle. Every strategy independently
     decides whether IT would trade this market — never a real order.
 
@@ -308,7 +321,17 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
     really get, especially for anything beyond a token position. When
     omitted (a caller that hasn't fetched them, or a fetch that failed this
     cycle), every strategy falls back to the flat top-of-book assumption
-    exactly as before — this is additive, never a hard requirement."""
+    exactly as before — this is additive, never a hard requirement.
+
+    hours_until_close: only used by the settlement_window kind, which
+    gates on trading exclusively in the last few hours before a market
+    closes (see strategy.py's near-close observation blending for why
+    that window is worth treating differently).
+
+    yes_bid: the resting bid, separate from yes_ask — only used by kinds
+    that care about the bid-ask spread itself (tight_spread_only) or
+    order-book imbalance (depth_imbalance), neither of which yes_ask/no_ask
+    alone can express."""
     engines = get_engines()
 
     for name, cfg in ACTIVE_STRATEGIES.items():
@@ -340,6 +363,17 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             if station_code not in allowed_stations:
                 continue
 
+        # One level narrower still: pins a strategy to one specific measure
+        # within a category — needed for settlement_window, which only
+        # makes sense for temperature_high (a daily low settles overnight,
+        # so hours_until_close being small says nothing useful about it —
+        # see strategy.estimate_temperature_probability's docstring for
+        # the full reasoning). category_filter alone can't express this,
+        # since "Temperature" covers both highs and lows.
+        measure_filter = cfg.get("measure_filter")
+        if measure_filter and measure != measure_filter:
+            continue
+
         if kind in ("calibrated", "calibrated_confidence_weighted"):
             if not signal:
                 continue
@@ -355,6 +389,28 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             shift = abs(current_forecast_temp_f - previous_forecast_temp_f)
             if shift < cfg.get("forecast_shift_threshold_f", 3.0):
                 continue  # nothing moved enough this cycle to be "momentum," not just noise
+            price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
+            if price is None:
+                continue
+            candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
+            model_prob = signal.model_probability_yes
+
+        elif kind == "settlement_window":
+            # Trades ONLY in the last few hours before close, on the
+            # strength of strategy.py's near-close observation blending
+            # (temperature_high only — see its docstring for why a daily
+            # low can't use this). Deliberately its OWN strategy rather
+            # than folding into an existing calibrated_* one: every
+            # calibrated_* strategy already benefits from the improved
+            # signal automatically, but isolating "trades made specifically
+            # because we were close to settlement" into one dedicated
+            # bucket is what actually lets the confidence/edge analytics
+            # and retrospective check whether this hypothesis holds up
+            # against real outcomes, rather than mixing it in with trades
+            # made many hours out under much higher uncertainty.
+            if (not signal or hours_until_close is None
+                    or hours_until_close > cfg.get("max_hours_until_close", 3.0)):
+                continue
             price = yes_ask if signal.side == "yes" else (100 - yes_ask if yes_ask else None)
             if price is None:
                 continue
