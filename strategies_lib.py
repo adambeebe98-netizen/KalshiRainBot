@@ -86,6 +86,57 @@ def longshot_candidate(signal: Optional[TradeSignal], price_cents: int,
     )
 
 
+def price_for_side(side: str, yes_ask: Optional[int], no_ask: Optional[int]) -> Optional[int]:
+    """
+    The real ask price for whichever side a signal/candidate wants to buy.
+
+    CONFIRMED BUG this fixes: every directional strategy in shadow.py used
+    to compute a "no" price as (100 - yes_ask) instead of using the
+    already-correct no_ask parameter directly. That's not an
+    approximation — it's a fabricated number with no mechanical
+    relationship to the real no-side price at all. no_ask, by the time it
+    reaches this point, is either a real direct quote from Kalshi, or
+    bot.py's own fallback of (100 - yes_bid) — which IS mechanically
+    correct, since a resting YES BID at price P is the same order as a
+    resting NO ASK at (100-P) on Kalshi's linked order books. Worse, the
+    old (100 - yes_ask if yes_ask else None) pattern returned None
+    whenever yes_ask happened to be missing, even when a perfectly good
+    real no_ask value was available — exactly the same "thin market, only
+    one side quoted" scenario rain_always_trade was fixed for, just
+    silently affecting nearly every other directional strategy instead.
+    """
+    return yes_ask if side == "yes" else no_ask
+
+
+def book_imbalance_side(
+    yes_bids: Optional[list[tuple[int, int]]], no_bids: Optional[list[tuple[int, int]]],
+    min_total_depth: int = 20, min_imbalance_ratio: float = 3.0,
+) -> Optional[str]:
+    """
+    Pure signal extraction, shared by depth_imbalance_candidate (trades
+    the imbalance directly) and the confirmed_signal strategy (requires
+    the imbalance to AGREE with an independent calibrated-model direction
+    before trading either alone). Returns "yes", "no", or None (no real
+    imbalance, or not enough book data to say) — see
+    depth_imbalance_candidate's docstring for the full reasoning behind
+    min_total_depth/min_imbalance_ratio and the fail-closed posture on
+    missing data.
+    """
+    if not yes_bids or not no_bids:
+        return None
+    yes_depth = sum(size for _, size in yes_bids)
+    no_depth = sum(size for _, size in no_bids)
+    if yes_depth + no_depth < min_total_depth:
+        return None
+    if yes_depth == 0 or no_depth == 0:
+        return None
+    if yes_depth >= no_depth * min_imbalance_ratio:
+        return "yes"
+    if no_depth >= yes_depth * min_imbalance_ratio:
+        return "no"
+    return None
+
+
 def depth_imbalance_candidate(
     yes_ask: Optional[int], no_ask: Optional[int],
     yes_bids: Optional[list[tuple[int, int]]], no_bids: Optional[list[tuple[int, int]]],
@@ -105,33 +156,15 @@ def depth_imbalance_candidate(
     not open, on missing data. That's a genuinely different posture from
     most strategies here, since without real numbers on both sides
     there's no signal to compute at all, not just a less-good one.
-
-    min_total_depth guards against a thin, quiet book producing a
-    meaningless ratio from tiny absolute numbers (5 contracts vs 1 is a
-    "5x imbalance" that means nothing on an illiquid market).
-    min_imbalance_ratio is how lopsided the two sides need to be before
-    this counts as a real signal rather than ordinary noise.
     """
-    if not yes_bids or not no_bids:
+    side = book_imbalance_side(yes_bids, no_bids, min_total_depth, min_imbalance_ratio)
+    if side is None:
+        return None
+    price = yes_ask if side == "yes" else no_ask
+    if price is None:
         return None
     yes_depth = sum(size for _, size in yes_bids)
     no_depth = sum(size for _, size in no_bids)
-    if yes_depth + no_depth < min_total_depth:
-        return None
-    if yes_depth == 0 or no_depth == 0:
-        # A truly empty side is more likely just unquoted right now than a
-        # genuine, tradeable imbalance signal.
-        return None
-
-    if yes_depth >= no_depth * min_imbalance_ratio:
-        side, price = "yes", yes_ask
-    elif no_depth >= yes_depth * min_imbalance_ratio:
-        side, price = "no", no_ask
-    else:
-        return None  # not lopsided enough to count as a real signal
-
-    if price is None:
-        return None
     return StrategyCandidate(
         side=side, price_cents=price, edge_cents=0,
         rationale=f"depth imbalance: yes_bid_depth={yes_depth} no_bid_depth={no_depth} "
