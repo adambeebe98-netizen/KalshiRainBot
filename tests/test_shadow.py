@@ -402,6 +402,74 @@ class TestSettlementWindow(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class TestRainSettlementWindow(unittest.TestCase):
+    """The rain analog of temp_settlement_window — needed zero new
+    dispatch logic, since bot.py already passes hours_until_close
+    unconditionally for every measure, and the settlement_window kind
+    itself is measure-agnostic; the scoping happens entirely through
+    measure_filter in the strategy config."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_is_registered(self):
+        self.assertIn("rain_settlement_window", shadow.ACTIVE_STRATEGIES)
+
+    def test_fires_within_the_window_on_precipitation_daily(self):
+        shadow.evaluate_and_log("T1", make_signal("T1"), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='rain_settlement_window' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_does_not_fire_far_from_close(self):
+        shadow.evaluate_and_log("T2", make_signal("T2"), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily", hours_until_close=10.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='rain_settlement_window' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_on_temperature_markets(self):
+        shadow.evaluate_and_log("T3", make_signal("T3"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="temperature_high", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='rain_settlement_window' AND ticker='T3'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_on_precipitation_monthly(self):
+        """A monthly market's hours_until_close reflects the end of the
+        MONTH, not a same-day window -- must never be treated the same
+        as precipitation_daily."""
+        shadow.evaluate_and_log("T4", make_signal("T4"), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_monthly", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='rain_settlement_window' AND ticker='T4'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_temp_settlement_window_remains_correctly_scoped(self):
+        """Confirms adding the rain variant didn't loosen the temperature
+        variant's own measure_filter."""
+        shadow.evaluate_and_log("T5", make_signal("T5"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="temperature_high", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='temp_settlement_window' AND ticker='T5'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+
 class TestDepthImbalance(unittest.TestCase):
     def setUp(self):
         storage.init_db()
