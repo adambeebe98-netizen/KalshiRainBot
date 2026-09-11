@@ -74,5 +74,66 @@ class TestCalibrationBias(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class TestIsTrusted(unittest.TestCase):
+    """Covers is_trusted() — a different question from get_bias(): not
+    "how much correction," but "has this station/measure been directly,
+    empirically verified as well-aligned," used by the calibration_trusted
+    strategy."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM calibration_stats")
+            conn.commit()
+
+    def _feed(self, station, measure, predicted, actual_bool, times=1):
+        for _ in range(times):
+            calibration.record_outcome(station, measure, predicted, actual_bool)
+
+    def test_not_trusted_below_minimum_samples(self):
+        self._feed("KAUS", "precipitation_daily", 0.70, True, times=5)
+        trusted, note = calibration.is_trusted("KAUS", "precipitation_daily")
+        self.assertFalse(trusted)
+        self.assertIn("only 5 settled samples", note)
+
+    def test_trusted_with_enough_samples_and_small_bias(self):
+        for i in range(20):
+            calibration.record_outcome("KHOU", "precipitation_daily", 0.70, i % 10 < 7)
+        trusted, note = calibration.is_trusted("KHOU", "precipitation_daily")
+        self.assertTrue(trusted)
+
+    def test_not_trusted_with_enough_samples_but_large_bias(self):
+        for _ in range(20):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.70, False)
+        trusted, note = calibration.is_trusted("KAUS", "precipitation_daily")
+        self.assertFalse(trusted)
+        self.assertIn("exceeds", note)
+
+    def test_not_trusted_with_missing_station_or_measure(self):
+        trusted, _ = calibration.is_trusted(None, "precipitation_daily")
+        self.assertFalse(trusted)
+        trusted2, _ = calibration.is_trusted("KAUS", None)
+        self.assertFalse(trusted2)
+
+    def test_uses_raw_bias_not_the_clamped_correction_value(self):
+        """A raw bias of -0.90 gets clamped to -0.20 for the actual
+        correction, but the trust check must use the raw value — a
+        badly miscalibrated station must never pass just because the
+        correction itself is bounded."""
+        for _ in range(20):
+            calibration.record_outcome("KDEN", "precipitation_daily", 0.90, False)
+        bias, _ = calibration.get_bias("KDEN", "precipitation_daily")
+        self.assertEqual(bias, -calibration.MAX_BIAS_ADJUSTMENT)
+        trusted, _ = calibration.is_trusted("KDEN", "precipitation_daily", max_bias_for_trust=0.05)
+        self.assertFalse(trusted)
+
+    def test_custom_trust_threshold_is_respected(self):
+        for _ in range(20):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.70, False)  # bias = -0.70
+        # a very loose threshold should let even a large bias through
+        trusted, _ = calibration.is_trusted("KAUS", "precipitation_daily", max_bias_for_trust=0.99)
+        self.assertTrue(trusted)
+
+
 if __name__ == "__main__":
     unittest.main()
