@@ -262,5 +262,58 @@ class TestEvaluateMarketSideSelection(unittest.TestCase):
         self.assertNotIn("no real signal", signal.rationale)
 
 
+class TestNearCloseObservationBlending(unittest.TestCase):
+    """Covers a real gap: observed_temp_f used to be accepted but
+    completely ignored in the probability math, only shown in the
+    rationale text. Near settlement, a fresh observation is a much better
+    predictor than an hours-old forecast — scoped to temperature_high
+    specifically (see evaluate_temperature_market), since a daily low
+    settles overnight and an afternoon reading says nothing about it."""
+
+    def test_beyond_the_window_behaves_identically_to_no_blending(self):
+        with_time, _, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=12.0)
+        without_time, _, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=None)
+        self.assertEqual(with_time, without_time)
+
+    def test_near_close_shifts_probability_toward_the_observation(self):
+        far, _, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=12.0)
+        close, _, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=0.1)
+        self.assertLess(close, far)
+        self.assertLess(close, 0.15)
+
+    def test_rationale_explains_the_blending_only_when_it_applies(self):
+        _, rationale_close, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=0.1)
+        _, rationale_far, _ = estimate_temperature_probability(74.0, 85.0, 80.0, 90.0, hours_until_close=12.0)
+        self.assertIn("blended toward the live observation", rationale_close)
+        self.assertNotIn("blended", rationale_far)
+
+    def test_no_observation_means_no_blending_even_within_the_window(self):
+        no_obs, _, _ = estimate_temperature_probability(None, 85.0, 80.0, 90.0, hours_until_close=0.5)
+        far, _, _ = estimate_temperature_probability(None, 85.0, 80.0, 90.0, hours_until_close=None)
+        self.assertEqual(no_obs, far)
+
+    def test_stddev_genuinely_narrows_near_close(self):
+        wide, _, _ = estimate_temperature_probability(91.0, 90.0, 80.0, 90.0, hours_until_close=12.0)
+        narrow, _, _ = estimate_temperature_probability(91.0, 90.0, 80.0, 90.0, hours_until_close=0.1)
+        self.assertNotAlmostEqual(wide, narrow, places=3)
+
+    def test_temperature_high_receives_blending(self):
+        rules = make_rules(measure="temperature_high", threshold_low_f=80.0, threshold_high_f=90.0)
+        obs = make_observation(temperature_f=74.0)
+        forecast = [make_forecast_period(is_daytime=True, temperature_f=85.0)]
+        signal = evaluate_temperature_market("T1", 40, rules, obs, forecast, hours_until_close=0.5)
+        self.assertIn("blended toward the live observation", signal.rationale)
+
+    def test_temperature_low_never_receives_blending(self):
+        """THE important scoping test: a daily low settles overnight, so
+        an afternoon observation must never be blended in even when close
+        to close by clock time."""
+        rules = make_rules(measure="temperature_low", threshold_low_f=80.0, threshold_high_f=90.0)
+        obs = make_observation(temperature_f=74.0)
+        forecast = [make_forecast_period(is_daytime=True, temperature_f=85.0)]
+        signal = evaluate_temperature_market("T2", 40, rules, obs, forecast, hours_until_close=0.5)
+        self.assertNotIn("blended toward the live observation", signal.rationale)
+
+
 if __name__ == "__main__":
     unittest.main()
