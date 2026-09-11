@@ -630,5 +630,62 @@ class TestTightSpreadCalibrated(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class TestNoSideProbabilityDirection(unittest.TestCase):
+    """CONFIRMED SEVERE BUG this fixes: find_max_profitable_size needs the
+    probability that the TRADED side wins, but model_prob (always
+    signal.model_probability_yes) was passed unconditionally regardless of
+    side. A "no" trade with model_probability_yes=0.10 (meaning P(no)=0.90,
+    a highly confident bet) was evaluated as if it only had a 10% chance
+    of winning — silently making almost every genuinely profitable "no"
+    trade with real depth data available look wildly unprofitable and get
+    rejected. "yes" trades were never affected, since model_prob already
+    IS the correct probability for that side."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_a_confident_no_trade_with_real_depth_data_now_executes(self):
+        sig = TradeSignal(ticker="T1", side="no", model_probability=0.9, model_probability_yes=0.1,
+                           market_implied_probability=0.4, edge_cents=30, rationale="confident no bet")
+        shadow.evaluate_and_log("T1", sig, yes_ask=None, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(35, 20)], no_bids=[(55, 100)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side, count FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row, "a 90%-confident NO trade must not be silently rejected")
+        self.assertEqual(row[0], "no")
+
+    def test_yes_side_trades_are_unaffected_by_this_fix(self):
+        sig = TradeSignal(ticker="T2", side="yes", model_probability=0.9, model_probability_yes=0.9,
+                           market_implied_probability=0.4, edge_cents=30, rationale="confident yes bet")
+        shadow.evaluate_and_log("T2", sig, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(35, 100)], no_bids=[(55, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "yes")
+
+    def test_a_genuinely_unprofitable_no_trade_still_correctly_gets_rejected(self):
+        """Guards against over-correcting: a real 30%-confidence NO bet at
+        a price that doesn't support it must still fail."""
+        sig = TradeSignal(ticker="T3", side="no", model_probability=0.3, model_probability_yes=0.7,
+                           market_implied_probability=0.4, edge_cents=30, rationale="bad no bet")
+        shadow.evaluate_and_log("T3", sig, yes_ask=None, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(35, 20)], no_bids=[(55, 100)])
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T3'").fetchone()
+        self.assertIsNone(row, "a genuinely unprofitable NO trade must still be rejected")
+
+
 if __name__ == "__main__":
     unittest.main()
