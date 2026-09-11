@@ -401,5 +401,109 @@ class TestSettlementWindow(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class TestDepthImbalance(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_is_registered(self):
+        self.assertIn("depth_imbalance", shadow.ACTIVE_STRATEGIES)
+
+    def test_fires_on_a_strong_real_imbalance(self):
+        # yes_ask passed directly is 45c, but real depth-aware sizing (the
+        # same shared mechanism every directional strategy uses) re-derives
+        # the actual fill price from no_bids' implied ask levels once real
+        # book data is present — no_bids=[(50, 20)] implies a real YES ask
+        # of (100-50)=50c, which is what the trade should actually price
+        # at, not the flat top-of-book number passed in.
+        shadow.evaluate_and_log("T1", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(40, 100)], no_bids=[(50, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side, price_cents, rationale FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "yes")
+        self.assertEqual(row[1], 50)
+        self.assertIn("depth imbalance", row[2])
+
+    def test_does_not_fire_without_book_data(self):
+        shadow.evaluate_and_log("T2", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T2'").fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_on_a_balanced_book(self):
+        shadow.evaluate_and_log("T3", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(40, 50)], no_bids=[(50, 45)])
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T3'").fetchone()
+        self.assertIsNone(row)
+
+    def test_works_across_both_categories_since_it_ignores_the_weather_model(self):
+        shadow.evaluate_and_log("T4", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="temperature_high",
+                                 yes_bids=[(40, 100)], no_bids=[(50, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T4'").fetchone()
+        self.assertIsNotNone(row)
+
+
+class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
+    """Direct regression test for a real, confirmed bug found while
+    building depth_imbalance: gross_expected_cents (edge_cents * contracts)
+    minus any positive fee is always <= 0 when edge_cents=0, so
+    favorites_baseline's fee-survival check silently rejected EVERY
+    candidate it ever found, unconditionally — not "conditions rarely
+    arose," structurally impossible to ever pass. The exemption previously
+    only covered always_trade despite favorites_baseline sharing the
+    identical edge_cents=0 pattern."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_favorites_baseline_can_now_actually_trade(self):
+        shadow.evaluate_and_log("T1", None, yes_ask=92, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='favorites_baseline' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row, "favorites_baseline must be able to trade a 92c favorite")
+
+    def test_always_trade_still_works_as_before(self):
+        shadow.evaluate_and_log("T2", None, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='rain_always_trade' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_real_probability_based_strategies_still_correctly_enforce_the_fee_check(self):
+        """THE guard against over-correcting: a genuinely tiny edge from a
+        REAL probability-based strategy must still fail the fee check."""
+        tiny_edge_signal = TradeSignal(ticker="T3", side="yes", model_probability=0.51,
+                                         model_probability_yes=0.51, market_implied_probability=0.50,
+                                         edge_cents=1, rationale="tiny edge")
+        shadow.evaluate_and_log("T3", tiny_edge_signal, yes_ask=50, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T3'"
+            ).fetchone()
+        self.assertIsNone(row, "a genuinely tiny edge must still fail the fee-survival check")
+
+
 if __name__ == "__main__":
     unittest.main()
