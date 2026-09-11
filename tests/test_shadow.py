@@ -16,6 +16,7 @@ use_temp_db()
 
 import storage  # noqa: E402
 import shadow  # noqa: E402
+import calibration  # noqa: E402
 from strategy import TradeSignal  # noqa: E402
 
 
@@ -503,6 +504,130 @@ class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
                 "SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T3'"
             ).fetchone()
         self.assertIsNone(row, "a genuinely tiny edge must still fail the fee-survival check")
+
+
+class TestCalibrationTrusted(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_is_registered(self):
+        self.assertIn("calibration_trusted", shadow.ACTIVE_STRATEGIES)
+
+    def test_does_not_fire_without_enough_calibration_samples(self):
+        shadow.evaluate_and_log("T1", make_signal("T1"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='calibration_trusted' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_fires_once_well_aligned_calibration_data_exists(self):
+        for i in range(20):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.70, i % 10 < 7)
+        shadow.evaluate_and_log("T2", make_signal("T2"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='calibration_trusted' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("trust check", row[0])
+
+    def test_does_not_fire_when_bias_is_too_large_even_with_enough_samples(self):
+        for _ in range(20):
+            calibration.record_outcome("KHOU", "precipitation_daily", 0.70, False)
+        shadow.evaluate_and_log("T3", make_signal("T3"), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='calibration_trusted' AND ticker='T3'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_calibrated_balanced_is_unaffected_by_this_gate(self):
+        for _ in range(20):
+            calibration.record_outcome("KHOU", "precipitation_daily", 0.70, False)
+        shadow.evaluate_and_log("T4", make_signal("T4"), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T4'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+
+class TestTightSpreadCalibrated(unittest.TestCase):
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_is_registered(self):
+        self.assertIn("tight_spread_calibrated", shadow.ACTIVE_STRATEGIES)
+
+    def test_fires_on_a_tight_spread(self):
+        shadow.evaluate_and_log("T1", make_signal("T1"), yes_ask=42, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", yes_bid=40)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='tight_spread_calibrated' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("spread=2c", row[0])
+
+    def test_does_not_fire_on_a_wide_spread(self):
+        shadow.evaluate_and_log("T2", make_signal("T2"), yes_ask=50, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", yes_bid=30)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='tight_spread_calibrated' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_with_no_bid_data(self):
+        shadow.evaluate_and_log("T3", make_signal("T3"), yes_ask=42, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='tight_spread_calibrated' AND ticker='T3'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_negative_spread_fails_closed(self):
+        """A bid above the ask is bad/crossed quote data, not a genuinely
+        tight market — must never be treated as tradeable."""
+        shadow.evaluate_and_log("T4", make_signal("T4"), yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", yes_bid=45)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='tight_spread_calibrated' AND ticker='T4'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_exactly_at_the_threshold_counts_as_tight(self):
+        shadow.evaluate_and_log("T5", make_signal("T5"), yes_ask=45, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", yes_bid=40)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='tight_spread_calibrated' AND ticker='T5'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_calibrated_balanced_is_unaffected_by_this_gate(self):
+        shadow.evaluate_and_log("T6", make_signal("T6"), yes_ask=50, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", yes_bid=30)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T6'"
+            ).fetchone()
+        self.assertIsNotNone(row)
 
 
 if __name__ == "__main__":
