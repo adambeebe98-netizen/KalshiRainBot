@@ -262,6 +262,64 @@ class TestEvaluateMarketSideSelection(unittest.TestCase):
         self.assertNotIn("no real signal", signal.rationale)
 
 
+class TestRainNearCloseDecay(unittest.TestCase):
+    """Covers the analogous time-awareness improvement for precipitation:
+    a "40% chance of rain today" forecast issued that morning already
+    reflects the whole day's window, so by evening with nothing observed
+    yet, the REMAINING chance is genuinely lower, not still flatly 40%.
+    Critically scoped away from precipitation_monthly in
+    evaluate_market's caller (bot.py) — see that scoping test below."""
+
+    def test_far_from_close_behaves_identically_to_no_decay(self):
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        far, _, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=12.0)
+        none_, _, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=None)
+        self.assertEqual(far, none_)
+        self.assertEqual(far, 0.40)
+
+    def test_near_close_with_no_rain_yet_decays_the_probability(self):
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        far, _, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=12.0)
+        close, _, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=1.0)
+        self.assertLess(close, far)
+
+    def test_at_close_decays_to_zero(self):
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        at_close, _, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=0.0)
+        self.assertEqual(at_close, 0.0)
+
+    def test_already_measurable_precip_is_never_decayed(self):
+        """Once it's already rained, there's nothing to decay -- the
+        already_measurable short-circuit must run before any time logic."""
+        obs = make_observation(precipitation_last_hour_mm=2.5)
+        prob, _, _ = estimate_precip_probability(obs, [], True, hours_until_close=0.1)
+        self.assertEqual(prob, 0.97)
+
+    def test_rationale_explains_the_decay_only_when_it_applies(self):
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        _, rationale_close, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=1.0)
+        _, rationale_far, _ = estimate_precip_probability(obs, forecast, True, hours_until_close=12.0)
+        self.assertIn("decayed toward", rationale_close)
+        self.assertNotIn("decayed", rationale_far)
+
+    def test_no_signal_case_is_unaffected_by_hours_until_close(self):
+        prob, _, has_signal = estimate_precip_probability(None, [], None, hours_until_close=0.5)
+        self.assertEqual(prob, 0.5)
+        self.assertFalse(has_signal)
+
+    def test_evaluate_market_passes_the_decay_through_end_to_end(self):
+        rules = make_rules(measure="precipitation_daily")
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        signal = evaluate_market("T1", yes_price_cents=40, rules=rules, observation=obs,
+                                   forecast=forecast, hours_until_close=1.0)
+        self.assertIn("decayed toward", signal.rationale)
+
+
 class TestNearCloseObservationBlending(unittest.TestCase):
     """Covers a real gap: observed_temp_f used to be accepted but
     completely ignored in the probability math, only shown in the
