@@ -70,6 +70,23 @@ log = logging.getLogger("kalshi_weather_bot")
 RAIN_MAX_HORIZON_HOURS = 30
 
 
+def hours_until_close(close_time_str: str | None) -> float | None:
+    """
+    Shared close-time parsing — used both by is_far_future_rain (below)
+    and by evaluate_temperature_market's near-close observation blending
+    (see strategy.py). Returns None on a missing/malformed close_time
+    rather than raising, so callers can decide their own fail-open/closed
+    behavior instead of this function silently picking one for them.
+    """
+    if not close_time_str:
+        return None
+    try:
+        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        return (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
+    except (ValueError, TypeError):
+        return None
+
+
 def is_far_future_rain(close_time_str: str | None) -> bool:
     """
     Called only for markets ALREADY classified as measure=='precipitation_daily'
@@ -98,12 +115,8 @@ def is_far_future_rain(close_time_str: str | None) -> bool:
     """
     if not close_time_str:
         return False
-    try:
-        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-        hours_until_close = (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
-        return hours_until_close > RAIN_MAX_HORIZON_HOURS
-    except (ValueError, TypeError):
-        return False
+    hours = hours_until_close(close_time_str)
+    return hours is not None and hours > RAIN_MAX_HORIZON_HOURS
 
 
 def confirm_live_trading() -> bool:
@@ -324,7 +337,8 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 signal = evaluate_market(ticker, yes_price, rules, observation, forecast)
                 current_forecast_temp_f = previous_forecast_temp_f = None
             elif rules.measure in ("temperature_high", "temperature_low"):
-                signal = evaluate_temperature_market(ticker, yes_price, rules, observation, forecast)
+                signal = evaluate_temperature_market(ticker, yes_price, rules, observation, forecast,
+                                                      hours_until_close=hours_until_close(market.get("close_time")))
                 # For temp_forecast_momentum (see shadow.py): grab the
                 # previous cycle's logged forecast BEFORE overwriting it with
                 # this cycle's, so the comparison is "did it move since last
@@ -359,7 +373,9 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                      confidence=rules.confidence,
                                      current_forecast_temp_f=current_forecast_temp_f,
                                      previous_forecast_temp_f=previous_forecast_temp_f,
-                                     yes_bids=yes_bids, no_bids=no_bids)
+                                     yes_bids=yes_bids, no_bids=no_bids,
+                                     hours_until_close=hours_until_close(market.get("close_time")),
+                                     yes_bid=m_yes_bid)
 
             approved, reason = risk.approve_trade(
                 price_cents=(yes_price if signal.side == "yes" else 100 - yes_price),
