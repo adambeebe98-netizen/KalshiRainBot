@@ -120,12 +120,20 @@ def market_implied_probability(yes_price_cents: int) -> float:
 # historical data (there isn't any yet — that's what paper trading is for).
 FORECAST_STD_DEV_F = 4.0
 
+# Near settlement, a fresh observation is a much better predictor than a
+# forecast issued hours ago — see estimate_temperature_probability's
+# hours_until_close parameter for the full reasoning and the important
+# caveat about which measure this applies to.
+NEAR_CLOSE_WINDOW_HOURS = 6.0
+NEAR_CLOSE_MIN_STD_DEV_F = 1.0
+
 
 def estimate_temperature_probability(
     observed_temp_f: Optional[float],
     forecast_temp_f: Optional[float],
     threshold_low_f: Optional[float],
     threshold_high_f: Optional[float],
+    hours_until_close: Optional[float] = None,
 ) -> tuple[float, str, bool]:
     """
     Returns (probability the actual reading falls within
@@ -144,6 +152,22 @@ def estimate_temperature_probability(
     is exactly the common case for temperature bucket markets, not an
     edge case — the old assumption that this "would almost never clear
     min edge" didn't hold.
+
+    hours_until_close, when provided together with a real observed_temp_f,
+    blends the observation into the estimate as settlement approaches:
+    within NEAR_CLOSE_WINDOW_HOURS, the effective mean shifts toward the
+    live observation and the assumed error shrinks toward
+    NEAR_CLOSE_MIN_STD_DEV_F, since there's less time left for conditions
+    to change than a forecast issued hours earlier accounted for.
+
+    IMPORTANT CALLER RESPONSIBILITY: only pass hours_until_close for a
+    'temperature_high' market. This reasoning does NOT hold for
+    'temperature_low' — a daily low settles overnight, so an afternoon
+    observation says nothing about a low that hasn't happened yet. This
+    function has no way to know which measure it's being called for, so
+    it trusts the caller (evaluate_temperature_market) to only enable
+    this for highs. Passing it for a low would blend in a same-day
+    afternoon reading that has no relationship to the overnight minimum.
     """
     notes = []
     if observed_temp_f is not None:
@@ -157,12 +181,22 @@ def estimate_temperature_probability(
         notes.append("no usable threshold parsed from rules text")
         return 0.5, "; ".join(notes), False
 
+    effective_temp = forecast_temp_f
+    effective_std = FORECAST_STD_DEV_F
+    if (hours_until_close is not None and observed_temp_f is not None
+            and 0 <= hours_until_close <= NEAR_CLOSE_WINDOW_HOURS):
+        closeness = 1 - (hours_until_close / NEAR_CLOSE_WINDOW_HOURS)  # 0 far, 1 at close
+        effective_temp = forecast_temp_f + closeness * (observed_temp_f - forecast_temp_f)
+        effective_std = FORECAST_STD_DEV_F - closeness * (FORECAST_STD_DEV_F - NEAR_CLOSE_MIN_STD_DEV_F)
+        notes.append(f"within {hours_until_close:.1f}h of close, blended toward the live "
+                     f"observation: effective estimate {effective_temp:.1f}F, stddev {effective_std:.1f}F")
+
     notes.append(f"forecast temp {forecast_temp_f:.0f}F vs threshold "
                  f"[{threshold_low_f if threshold_low_f is not None else '-inf'}, "
                  f"{threshold_high_f if threshold_high_f is not None else '+inf'}], "
                  f"assumed forecast error stddev {FORECAST_STD_DEV_F:.0f}F")
 
-    dist = NormalDist(mu=forecast_temp_f, sigma=FORECAST_STD_DEV_F)
+    dist = NormalDist(mu=effective_temp, sigma=effective_std)
     # +/-0.5F treats a whole-degree threshold as covering its rounding band
     # (e.g. "85F or higher" resolving true at a recorded 85 rounds to
     # covering [84.5, +inf)) — a small, deliberate, documented fudge rather
@@ -198,12 +232,21 @@ def evaluate_temperature_market(
     rules: MarketRules,
     observation: Optional[StationObservation],
     forecast: list[PrecipForecast],
+    hours_until_close: Optional[float] = None,
 ) -> TradeSignal:
     forecast_temp_f = pick_relevant_forecast_temp_f(rules.measure, forecast)
     observed_temp_f = observation.temperature_f if observation else None
 
+    # Only blend the live observation in for a daily HIGH — a daily LOW
+    # settles overnight, so an afternoon reading says nothing about a low
+    # that hasn't happened yet. See estimate_temperature_probability's
+    # docstring for the full reasoning; this is the one place responsible
+    # for that scoping.
+    effective_hours_until_close = hours_until_close if rules.measure == "temperature_high" else None
+
     raw_model_p, rationale, has_real_signal = estimate_temperature_probability(
-        observed_temp_f, forecast_temp_f, rules.threshold_low_f, rules.threshold_high_f
+        observed_temp_f, forecast_temp_f, rules.threshold_low_f, rules.threshold_high_f,
+        hours_until_close=effective_hours_until_close,
     )
 
     if not has_real_signal:
