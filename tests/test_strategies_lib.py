@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import unittest
 
+import strategies_lib
 from strategies_lib import (
     arbitrage_candidate, favorites_candidate, longshot_candidate,
     depth_imbalance_candidate, StrategyCandidate,
@@ -66,6 +67,50 @@ class TestLongshotCandidate(unittest.TestCase):
 
     def test_no_signal_returns_none(self):
         self.assertIsNone(longshot_candidate(None, price_cents=5))
+
+
+class TestPriceForSide(unittest.TestCase):
+    """CONFIRMED BUG this replaces: every directional strategy used to
+    compute a "no" price as (100 - yes_ask), a fabricated number with no
+    mechanical relationship to the real no-side price, and returned None
+    whenever yes_ask happened to be missing even when a perfectly good
+    real no_ask value was available."""
+
+    def test_yes_side_uses_yes_ask(self):
+        self.assertEqual(strategies_lib.price_for_side("yes", 45, 60), 45)
+
+    def test_no_side_uses_no_ask_directly_not_a_derived_value(self):
+        self.assertEqual(strategies_lib.price_for_side("no", 45, 60), 60)
+
+    def test_no_side_still_works_when_yes_ask_is_missing(self):
+        """THE regression: a thin market with only one side quoted (a
+        resting bid with no matching ask) must not silently lose its
+        real no-side price just because yes_ask happens to be None."""
+        self.assertEqual(strategies_lib.price_for_side("no", None, 60), 60)
+
+    def test_yes_side_returns_none_when_yes_ask_is_missing(self):
+        self.assertIsNone(strategies_lib.price_for_side("yes", None, 60))
+
+    def test_no_side_returns_none_when_no_ask_is_also_missing(self):
+        self.assertIsNone(strategies_lib.price_for_side("no", 45, None))
+
+
+class TestBookImbalanceSide(unittest.TestCase):
+    """The shared helper both depth_imbalance_candidate and the
+    confirmed_signal strategy build on."""
+
+    def test_returns_yes_on_strong_yes_side_depth(self):
+        self.assertEqual(strategies_lib.book_imbalance_side([(40, 100)], [(50, 20)]), "yes")
+
+    def test_returns_no_on_strong_no_side_depth(self):
+        self.assertEqual(strategies_lib.book_imbalance_side([(40, 20)], [(50, 100)]), "no")
+
+    def test_returns_none_when_balanced(self):
+        self.assertIsNone(strategies_lib.book_imbalance_side([(40, 50)], [(50, 45)]))
+
+    def test_returns_none_with_missing_data(self):
+        self.assertIsNone(strategies_lib.book_imbalance_side(None, [(50, 100)]))
+        self.assertIsNone(strategies_lib.book_imbalance_side([(40, 100)], None))
 
 
 class TestDepthImbalanceCandidate(unittest.TestCase):
