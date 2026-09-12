@@ -190,5 +190,71 @@ class TestAdvisorSafetyBoundaries(unittest.TestCase):
         self.assertEqual(logged, 2)
 
 
+class TestSuggestionDeduplication(unittest.TestCase):
+    """CONFIRMED BUG this fixes, found via real usage: nothing checked
+    whether a pending suggestion for a given (strategy, param) already
+    existed before writing a new one. Every advisor run (scheduled or
+    manually triggered) just appended another row — confirmed live:
+    swing.exit_offset ended up with two pending suggestions proposing
+    DIFFERENT values (12 and 15) from different runs, a genuinely
+    confusing, contradictory queue for a human to sort through by hand."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "suggestions", "meta", "strategy_overrides")
+
+    def _run_with_response(self, text: str) -> int:
+        with patch("anthropic.Anthropic") as mock_cls:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = fake_anthropic_response(text)
+            mock_cls.return_value = mock_client
+            return advisor.generate_suggestions()
+
+    def test_a_second_run_supersedes_the_first_for_the_same_param(self):
+        real_current = shadow.ACTIVE_STRATEGIES["swing"]["exit_offset"]
+        first = json.dumps([{"strategy": "swing", "param": "exit_offset", "current_value": real_current,
+                              "suggested_value": 15, "rationale": "first run"}])
+        self._run_with_response(first)
+        self.assertEqual(len(storage.get_suggestions(status="pending")), 1)
+
+        second = json.dumps([{"strategy": "swing", "param": "exit_offset", "current_value": real_current,
+                               "suggested_value": 12, "rationale": "second run, fresher data"}])
+        self._run_with_response(second)
+
+        pending = storage.get_suggestions(status="pending")
+        self.assertEqual(len(pending), 1, "must have exactly one pending suggestion, not two contradictory ones")
+        self.assertEqual(pending[0]["suggested_value"], 12.0, "the fresher suggestion should be the one that survives")
+
+    def test_the_superseded_suggestion_is_kept_not_deleted(self):
+        real_current = shadow.ACTIVE_STRATEGIES["swing"]["exit_offset"]
+        first = json.dumps([{"strategy": "swing", "param": "exit_offset", "current_value": real_current,
+                              "suggested_value": 15, "rationale": "first"}])
+        self._run_with_response(first)
+        second = json.dumps([{"strategy": "swing", "param": "exit_offset", "current_value": real_current,
+                               "suggested_value": 12, "rationale": "second"}])
+        self._run_with_response(second)
+
+        with storage.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT status, suggested_value FROM suggestions WHERE strategy='swing' AND param='exit_offset'"
+            ).fetchall()
+        self.assertEqual(len(rows), 2, "both rows should still exist, just with different statuses")
+        self.assertEqual({r[0] for r in rows}, {"pending", "superseded"})
+
+    def test_unrelated_params_are_not_affected(self):
+        swing_current = shadow.ACTIVE_STRATEGIES["swing"]["exit_offset"]
+        longshot_current = shadow.ACTIVE_STRATEGIES["longshot"]["min_price"]
+        first = json.dumps([{"strategy": "swing", "param": "exit_offset", "current_value": swing_current,
+                              "suggested_value": 15, "rationale": "a"}])
+        self._run_with_response(first)
+        second = json.dumps([{"strategy": "longshot", "param": "min_price", "current_value": longshot_current,
+                               "suggested_value": 5, "rationale": "b"}])
+        self._run_with_response(second)
+
+        pending = storage.get_suggestions(status="pending")
+        self.assertEqual(len(pending), 2, "unrelated (strategy, param) pairs must not supersede each other")
+
+
 if __name__ == "__main__":
     unittest.main()
