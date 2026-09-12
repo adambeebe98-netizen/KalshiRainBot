@@ -549,6 +549,31 @@ def load_last_shadow_bankroll(strategy: str, default_cents: int) -> int:
         return row[0] if row else default_cents
 
 
+def count_distinct_strategies_exposed_to_event(event_ticker: str | None,
+                                                 exclude_strategy: str | None = None) -> int:
+    """
+    How many DIFFERENT strategies currently hold an open position
+    somewhere in this same Kalshi event, other than exclude_strategy
+    itself. Foundation for shadow.py's concentration dampening — see its
+    docstring for the confirmed real-world motivation (20+ trades across
+    nearly every strategy all buying the same losing side of the same
+    underlying market, because they all share the same weather model).
+    Counts DISTINCT strategies, not trades — three trades from the same
+    strategy on the same event count as 1, not 3, since the concentration
+    risk this measures is "how many independent judgments have piled onto
+    this outcome," not "how many individual orders."
+    """
+    if not event_ticker:
+        return 0
+    with get_conn() as conn:
+        query = "SELECT COUNT(DISTINCT strategy) FROM shadow_trades WHERE event_ticker=? AND status='open'"
+        params: list = [event_ticker]
+        if exclude_strategy:
+            query += " AND strategy != ?"
+            params.append(exclude_strategy)
+        return conn.execute(query, params).fetchone()[0]
+
+
 def get_recent_strategy_performance(strategy: str, lookback: int = 20) -> dict:
     """
     Rolling-window performance for a strategy's last `lookback` SETTLED
