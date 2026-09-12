@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
                                    -- at decision time — lets analytics actually check whether
                                    -- confidence level predicts real outcomes, instead of just
                                    -- assuming the sizing multiplier it already drives is correct.
+    event_ticker TEXT,            -- Kalshi's own event grouping (e.g. every bucket/threshold
+                                   -- market for one city+day shares one event_ticker) — lets a
+                                   -- strategy check "do I already hold a position on this same
+                                   -- underlying event" before adding another. CONFIRMED BUG this
+                                   -- exists to fix: favorites_baseline bought YES on four
+                                   -- mutually-conflicting bucket markets for the same underlying
+                                   -- temperature event simultaneously (its rule — buy anything
+                                   -- priced >=95c — had no concept of "already exposed to this
+                                   -- event"), losing all four (~4410c combined, confirmed live).
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -198,6 +207,7 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN sample_member_ticker TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN rationale TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN confidence TEXT",
+        "ALTER TABLE shadow_trades ADD COLUMN event_ticker TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -329,18 +339,41 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       precomputed_payout_cents: int | None = None,
                       sample_member_ticker: str | None = None,
                       rationale: str | None = None,
-                      confidence: str | None = None) -> int:
+                      confidence: str | None = None,
+                      event_ticker: str | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
             "model_probability, station_code, measure, exit_target_cents, "
-            "precomputed_payout_cents, sample_member_ticker, rationale, confidence) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
-             precomputed_payout_cents, sample_member_ticker, rationale, confidence),
+             precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker),
         )
         return cur.lastrowid
+
+
+def has_open_position_for_event(strategy: str, event_ticker: str) -> bool:
+    """
+    Does this strategy already hold an open position somewhere in this
+    same Kalshi event (e.g. any bucket/threshold market for one city+day
+    shares one event_ticker)? Used by favorites_baseline specifically —
+    see log_shadow_trade's event_ticker column docstring for the
+    confirmed bug this exists to prevent: buying multiple
+    mutually-conflicting positions on the same underlying outcome isn't
+    diversification, it's the same bet placed several times with extra
+    steps. Returns False (fails open) if event_ticker is empty — no
+    event to check against.
+    """
+    if not event_ticker:
+        return False
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM shadow_trades WHERE strategy=? AND event_ticker=? AND status='open' LIMIT 1",
+            (strategy, event_ticker),
+        ).fetchone()
+        return row is not None
 
 
 def get_open_shadow_trades(strategy: str | None = None) -> list[dict]:
