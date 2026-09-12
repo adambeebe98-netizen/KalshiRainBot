@@ -353,7 +353,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                       yes_bids: Optional[list[tuple[int, int]]] = None,
                       no_bids: Optional[list[tuple[int, int]]] = None,
                       hours_until_close: Optional[float] = None,
-                      yes_bid: Optional[int] = None) -> None:
+                      yes_bid: Optional[int] = None,
+                      event_ticker: Optional[str] = None) -> None:
     """Called once per scanned market per cycle. Every strategy independently
     decides whether IT would trade this market — never a real order.
 
@@ -381,7 +382,15 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
     yes_bid: the resting bid, separate from yes_ask — only used by kinds
     that care about the bid-ask spread itself (tight_spread_only) or
     order-book imbalance (depth_imbalance), neither of which yes_ask/no_ask
-    alone can express."""
+    alone can express.
+
+    event_ticker: Kalshi's own event grouping (every bucket/threshold
+    market for one city+day shares one event_ticker). Used by favorites
+    specifically to check "do I already hold a position on this same
+    underlying event" — see storage.has_open_position_for_event's
+    docstring for the confirmed bug this prevents: buying multiple
+    mutually-conflicting bucket positions on the same underlying outcome
+    isn't diversification, it's the same bet placed several times."""
     engines = get_engines()
 
     for name, cfg in ACTIVE_STRATEGIES.items():
@@ -606,7 +615,26 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             continue
 
         elif kind == "favorites":
+            # CONFIRMED BUG this check fixes: this rule (buy anything
+            # priced >=threshold) has no concept of market STRUCTURE — it
+            # can't tell a directional "will it exceed 84?" market from a
+            # narrow bucket "will it land in [84.5, 86.5)?" market that's
+            # mutually exclusive with several sibling buckets for the SAME
+            # underlying event. Confirmed live: it bought YES on four
+            # different bucket markets for one temperature event
+            # simultaneously, all at 98c, and lost all four (~4410c
+            # combined) — not a calibration problem, a structural one.
+            # Rather than try to parse ticker suffixes to detect which
+            # markets are mutually exclusive (fragile, format-specific),
+            # this takes the simpler, more robust position: never hold
+            # more than one open favorites position on the same event at
+            # all, regardless of whether the specific markets happen to be
+            # mutually exclusive, overlapping, or independent — piling
+            # into the same underlying outcome multiple ways isn't
+            # diversification under any of those relationships.
             if yes_ask is None:
+                continue
+            if event_ticker and storage.has_open_position_for_event(name, event_ticker):
                 continue
             candidate = lib.favorites_candidate(yes_ask, cfg.get("threshold", 90))
             model_prob = None
@@ -761,7 +789,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         storage.log_shadow_trade(name, ticker, candidate.side, contracts, realized_price,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
                                   exit_target_cents=exit_target, rationale=candidate.rationale,
-                                  confidence=confidence)
+                                  confidence=confidence, event_ticker=event_ticker)
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
