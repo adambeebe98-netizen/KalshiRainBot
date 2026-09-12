@@ -85,6 +85,51 @@ def performance_dampening_multiplier(perf: dict) -> float:
         return COLD_STREAK_DAMPENING_MULTIPLIER
     return 1.0
 
+
+# Cross-strategy concentration dampening — see
+# concentration_dampening_multiplier's docstring for the confirmed
+# real-world motivation. Deliberately a SCALING response, not a hard cap:
+# a hard "at most N strategies per event" rule would have to arbitrarily
+# pick which strategies get the slot (whichever happens to evaluate
+# first in a scan cycle), which isn't obviously better-informed than any
+# other strategy's judgment. Scaling down every ADDITIONAL strategy's
+# size instead lets every strategy still express its own signal, just
+# with less weight as the same underlying outcome gets more crowded —
+# same "reduce risk, never fully block, never coordinate decisions"
+# philosophy as the other dampening mechanisms in this file.
+CONCENTRATION_DAMPENING_MODERATE_THRESHOLD = 1   # 1-2 other strategies already exposed
+CONCENTRATION_DAMPENING_SEVERE_THRESHOLD = 3     # 3+ other strategies already exposed
+CONCENTRATION_DAMPENING_MODERATE_MULTIPLIER = 0.5
+CONCENTRATION_DAMPENING_SEVERE_MULTIPLIER = 0.25
+
+
+def concentration_dampening_multiplier(other_strategies_count: int) -> float:
+    """
+    Pure function, same testable-in-isolation reasoning as
+    performance_dampening_multiplier above — provably can only ever
+    return <= 1.0.
+
+    CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found 20+
+    trades across nearly every strategy (calibrated variants, longshot,
+    swing, tight_spread_calibrated, rain_always_trade) all independently
+    buying the same losing side of the same underlying market
+    (KXRAIN-26SEP11-SEA) simultaneously. Because nearly every directional
+    strategy draws from the same underlying weather model with different
+    risk tiers/filters layered on top, running 20+ of them in parallel
+    doesn't add diversification when they all share the same blind spot —
+    it just multiplies the damage from one bad judgment across the whole
+    portfolio at once. This doesn't prevent that from happening again
+    (each strategy still independently decides to trade), but it directly
+    shrinks the aggregate exposure as more of them pile onto the same
+    outcome, rather than letting every one of them trade at full,
+    uncoordinated size.
+    """
+    if other_strategies_count >= CONCENTRATION_DAMPENING_SEVERE_THRESHOLD:
+        return CONCENTRATION_DAMPENING_SEVERE_MULTIPLIER
+    if other_strategies_count >= CONCENTRATION_DAMPENING_MODERATE_THRESHOLD:
+        return CONCENTRATION_DAMPENING_MODERATE_MULTIPLIER
+    return 1.0
+
 # Bracket-arbitrage tuning — deliberately NOT in TUNABLE_PARAMS/advisor-editable,
 # same reasoning as the calibrated model itself: this is math (capital
 # efficiency + early-exit salvage), not a heuristic threshold to sweep.
@@ -756,6 +801,19 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             cal_dampening = calibration.calibration_dampening_multiplier(station_code, measure)
             if cal_dampening < 1.0:
                 contracts = max(1, int(contracts * cal_dampening))
+
+        # Cross-strategy concentration dampening — see
+        # concentration_dampening_multiplier's docstring above for the
+        # confirmed real-world motivation. Applied to every directional
+        # kind EXCEPT arbitrage, which buys BOTH sides simultaneously and
+        # is hedged by construction — multiple arbitrage positions on the
+        # same event don't carry the same correlated directional risk a
+        # crowd of one-sided directional bets does.
+        if kind != "arbitrage" and event_ticker:
+            other_count = storage.count_distinct_strategies_exposed_to_event(event_ticker, exclude_strategy=name)
+            conc_dampening = concentration_dampening_multiplier(other_count)
+            if conc_dampening < 1.0:
+                contracts = max(1, int(contracts * conc_dampening))
 
         # Real depth-aware sizing/pricing when the caller fetched the order
         # book this cycle (see the docstring above and depth_sizing.py) —
