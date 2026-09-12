@@ -524,6 +524,62 @@ class TestDepthImbalance(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class TestFavoritesSameEventLimit(unittest.TestCase):
+    """CONFIRMED BUG this fixes, found via real loss analysis:
+    favorites_baseline's rule (buy anything priced >=threshold) has no
+    concept of market structure — it bought YES on four different bucket
+    markets for the same underlying temperature event simultaneously, all
+    at 98c, and lost all four (~4410c combined). Directly reproduces that
+    exact scenario."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_reproduces_the_exact_confirmed_scenario(self):
+        shadow.evaluate_and_log("KXHIGHTSAN-26SEP11-T84", None, yes_ask=98, no_ask=None,
+                                 station_code="KSAN", measure="temperature_high",
+                                 event_ticker="KXHIGHTSAN-26SEP11")
+        for suffix in ["B84.5", "B86.5", "B88.5", "B90.5"]:
+            shadow.evaluate_and_log(f"KXHIGHTSAN-26SEP11-{suffix}", None, yes_ask=98, no_ask=None,
+                                     station_code="KSAN", measure="temperature_high",
+                                     event_ticker="KXHIGHTSAN-26SEP11")
+        with storage.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT ticker FROM shadow_trades WHERE strategy='favorites_baseline'"
+            ).fetchall()
+        self.assertEqual(len(rows), 1, "must hold exactly one position on this event, not five")
+        self.assertEqual(rows[0][0], "KXHIGHTSAN-26SEP11-T84", "the FIRST market seen should be the one that trades")
+
+    def test_a_different_event_is_unaffected(self):
+        shadow.evaluate_and_log("KXHIGHTSAN-26SEP11-T84", None, yes_ask=98, no_ask=None,
+                                 station_code="KSAN", measure="temperature_high",
+                                 event_ticker="KXHIGHTSAN-26SEP11")
+        shadow.evaluate_and_log("KXHIGHTAUS-26SEP11-T85", None, yes_ask=97, no_ask=None,
+                                 station_code="KAUS", measure="temperature_high",
+                                 event_ticker="KXHIGHTAUS-26SEP11")
+        with storage.get_conn() as conn:
+            rows = conn.execute("SELECT ticker FROM shadow_trades WHERE strategy='favorites_baseline'").fetchall()
+        self.assertEqual(len(rows), 2)
+
+    def test_a_new_position_is_allowed_once_the_first_settles(self):
+        shadow.evaluate_and_log("KXHIGHTSAN-26SEP11-T84", None, yes_ask=98, no_ask=None,
+                                 station_code="KSAN", measure="temperature_high",
+                                 event_ticker="KXHIGHTSAN-26SEP11")
+        with storage.get_conn() as conn:
+            tid = conn.execute("SELECT id FROM shadow_trades WHERE ticker='KXHIGHTSAN-26SEP11-T84'").fetchone()[0]
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=200)
+        shadow.evaluate_and_log("KXHIGHTSAN-26SEP11-B92.5", None, yes_ask=96, no_ask=None,
+                                 station_code="KSAN", measure="temperature_high",
+                                 event_ticker="KXHIGHTSAN-26SEP11")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE ticker='KXHIGHTSAN-26SEP11-B92.5'").fetchone()
+        self.assertIsNotNone(row)
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
