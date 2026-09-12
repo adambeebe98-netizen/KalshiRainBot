@@ -87,6 +87,57 @@ def is_trusted(station_code: str | None, measure: str | None,
                    f"{max_bias_for_trust:.2f} trust threshold — model empirically verified here")
 
 
+# Sizing dampening based on calibration sample count — see
+# calibration_dampening_multiplier's docstring. Two tiers, deliberately
+# matching the simplicity of shadow.py's performance_dampening_multiplier
+# (full size or a fixed fraction, no continuous scale) rather than a
+# smoother function that would be harder to reason about and test.
+CALIBRATION_DAMPENING_ZERO_SAMPLES_MULTIPLIER = 0.25
+CALIBRATION_DAMPENING_PARTIAL_SAMPLES_MULTIPLIER = 0.5
+
+
+def calibration_dampening_multiplier(station_code: str | None, measure: str | None) -> float:
+    """
+    Mechanical, always-safe-to-automate size reduction for trading a
+    station/measure with little or no real settlement history — same
+    "reduce risk, never increase it" philosophy as
+    shadow.performance_dampening_multiplier, just triggered by calibration
+    sample count instead of a losing streak.
+
+    CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found 20+
+    trades across nearly every strategy all buying the same losing side
+    of the same underlying market (KXRAIN-26SEP11-SEA), every one of them
+    with 7-13 calibration samples — below the 20-sample threshold,
+    meaning the RAW, uncorrected forecast POP was being trusted directly,
+    with no station-specific base-rate correction applied yet. Because
+    nearly every directional strategy shares the same underlying weather
+    model, they all made the same mistake simultaneously and lost
+    together — that's not diversification, it's the same bet placed many
+    times. This doesn't fully decorrelate strategies that share a model
+    (a real cross-strategy exposure cap is a separate, larger design
+    question), but it directly shrinks the damage when that shared model
+    turns out to be wrong for a specific, unproven station/measure.
+
+    Applied uniformly to every strategy that consumes the calibrated
+    probability model (see shadow.py's shared sizing block) — naturally a
+    no-op for calibration_trusted's own qualifying trades, since that
+    strategy already requires n>=20 before trading at all, the exact same
+    threshold this function uses.
+
+    Zero samples (literally no settlement history at all for this
+    station/measure) gets dampened harder than a partial count (some real
+    evidence, just not enough yet) — the SEA cluster's own worst cases
+    were entering with as few as 7 samples, so "some but not enough" data
+    still deserves real caution, not just a token reduction.
+    """
+    n, _, _ = storage.get_calibration_stats(station_code, measure)
+    if n == 0:
+        return CALIBRATION_DAMPENING_ZERO_SAMPLES_MULTIPLIER
+    if n < MIN_SAMPLES_FOR_CALIBRATION:
+        return CALIBRATION_DAMPENING_PARTIAL_SAMPLES_MULTIPLIER
+    return 1.0
+
+
 def apply_calibration(raw_probability: float, station_code: str | None, measure: str | None) -> tuple[float, str]:
     bias, note = get_bias(station_code, measure)
     adjusted = max(0.01, min(0.99, raw_probability + bias))
