@@ -264,6 +264,52 @@ class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
         self.assertEqual(temp_row["settled"], 1)
 
 
+class TestCountDistinctStrategiesExposedToEvent(unittest.TestCase):
+    """Foundation for shadow.py's concentration dampening — see its
+    docstring for the confirmed real-world motivation (20+ trades across
+    nearly every strategy all buying the same losing side of the same
+    underlying market, because they all share the same weather model)."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_zero_when_nothing_is_open(self):
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event("EVENT1"), 0)
+
+    def test_counts_distinct_strategies_not_trades(self):
+        storage.log_shadow_trade("calibrated_conservative", "T1", "yes", 10, 40, event_ticker="EVENT1")
+        storage.log_shadow_trade("calibrated_conservative", "T2", "yes", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event("EVENT1"), 1)
+
+    def test_multiple_different_strategies_increment_the_count(self):
+        storage.log_shadow_trade("calibrated_conservative", "T1", "yes", 10, 40, event_ticker="EVENT1")
+        storage.log_shadow_trade("longshot", "T2", "yes", 10, 5, event_ticker="EVENT1")
+        storage.log_shadow_trade("swing", "T3", "yes", 10, 30, event_ticker="EVENT1")
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event("EVENT1"), 3)
+
+    def test_exclude_strategy_omits_the_current_strategy(self):
+        storage.log_shadow_trade("calibrated_conservative", "T1", "yes", 10, 40, event_ticker="EVENT1")
+        storage.log_shadow_trade("longshot", "T2", "yes", 10, 5, event_ticker="EVENT1")
+        self.assertEqual(
+            storage.count_distinct_strategies_exposed_to_event("EVENT1", exclude_strategy="calibrated_conservative"),
+            1,
+        )
+
+    def test_a_different_event_is_unaffected(self):
+        storage.log_shadow_trade("calibrated_conservative", "T1", "yes", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event("EVENT2"), 0)
+
+    def test_a_settled_position_no_longer_counts(self):
+        tid = storage.log_shadow_trade("calibrated_conservative", "T1", "yes", 10, 40, event_ticker="EVENT1")
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=50)
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event("EVENT1"), 0)
+
+    def test_missing_event_ticker_returns_zero_without_crashing(self):
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event(None), 0)
+        self.assertEqual(storage.count_distinct_strategies_exposed_to_event(""), 0)
+
+
 class TestHasOpenPositionForEvent(unittest.TestCase):
     """Foundation for the favorites_baseline same-event fix — see
     log_shadow_trade's event_ticker column docstring for the confirmed
