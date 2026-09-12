@@ -388,7 +388,7 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                      previous_forecast_temp_f=previous_forecast_temp_f,
                                      yes_bids=yes_bids, no_bids=no_bids,
                                      hours_until_close=hours_until_close(market.get("close_time")),
-                                     yes_bid=m_yes_bid)
+                                     yes_bid=m_yes_bid, event_ticker=market.get("event_ticker"))
 
             approved, reason = risk.approve_trade(
                 price_cents=(yes_price if signal.side == "yes" else 100 - yes_price),
