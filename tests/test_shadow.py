@@ -9,6 +9,7 @@ combined with real depth-aware sizing.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests.helpers import use_temp_db, clear_tables
 
@@ -627,6 +628,74 @@ class TestCalibrationAwareDampening(unittest.TestCase):
                 "SELECT count FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T1'"
             ).fetchone()
         self.assertIsNotNone(row)
+
+
+class TestConcentrationDampeningMultiplier(unittest.TestCase):
+    """Pure function tests — see the module-level constants' docstring
+    above for the confirmed real-world motivation."""
+
+    def test_zero_others_gets_full_size(self):
+        self.assertEqual(shadow.concentration_dampening_multiplier(0), 1.0)
+
+    def test_one_or_two_others_gets_moderate_dampening(self):
+        self.assertEqual(shadow.concentration_dampening_multiplier(1), 0.5)
+        self.assertEqual(shadow.concentration_dampening_multiplier(2), 0.5)
+
+    def test_three_or_more_gets_severe_dampening(self):
+        self.assertEqual(shadow.concentration_dampening_multiplier(3), 0.25)
+        self.assertEqual(shadow.concentration_dampening_multiplier(10), 0.25)
+
+    def test_never_exceeds_1_across_a_wide_sweep(self):
+        for count in range(0, 50):
+            self.assertLessEqual(shadow.concentration_dampening_multiplier(count), 1.0)
+
+
+class TestConcentrationDampeningIntegration(unittest.TestCase):
+    """Direct reproduction of the confirmed real-world scenario: as more
+    DIFFERENT strategies pile onto the same underlying event within one
+    scan cycle, later ones size down relative to what they'd have traded
+    with dampening disabled. Isolated via mocking, since evaluate_and_log
+    always processes every matching strategy together for a given
+    ticker — there's no way to construct a genuinely "only one strategy
+    trades this event" scenario to compare against directly."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_later_strategies_on_a_crowded_event_size_smaller_than_undampened(self):
+        sig = TradeSignal(ticker="T", side="yes", model_probability=0.85, model_probability_yes=0.85,
+                           market_implied_probability=0.16, edge_cents=30, rationale="test")
+
+        with patch.object(shadow, "concentration_dampening_multiplier", return_value=1.0):
+            shadow.evaluate_and_log("EVENT1", sig, yes_ask=6, no_ask=None,
+                                     station_code="KSEA", measure="precipitation_daily", event_ticker="EVENT1")
+        with storage.get_conn() as conn:
+            no_damp = dict(conn.execute("SELECT strategy, count FROM shadow_trades").fetchall())
+
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM shadow_trades")
+            conn.commit()
+
+        shadow.evaluate_and_log("EVENT1", sig, yes_ask=6, no_ask=None,
+                                 station_code="KSEA", measure="precipitation_daily", event_ticker="EVENT1")
+        with storage.get_conn() as conn:
+            with_damp = dict(conn.execute("SELECT strategy, count FROM shadow_trades").fetchall())
+
+        reduced = sum(1 for s in no_damp if s in with_damp and with_damp[s] < no_damp[s])
+        self.assertGreaterEqual(reduced, 5, "most later-evaluated strategies should show real dampening")
+
+    def test_arbitrage_is_exempt_hedged_by_construction(self):
+        for s in ["calibrated_conservative", "calibrated_balanced", "calibrated_aggressive", "longshot"]:
+            storage.log_shadow_trade(s, f"T-{s}", "yes", 10, 6, event_ticker="EVENT1")
+        shadow.evaluate_and_log("EVENT1", None, yes_ask=45, no_ask=52,
+                                 station_code="KSEA", measure="precipitation_daily", event_ticker="EVENT1")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='arbitrage' AND ticker='EVENT1'").fetchone()
+        self.assertIsNotNone(row, "arbitrage should still trade despite 4 other strategies already exposed")
 
 
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
