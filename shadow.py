@@ -736,6 +736,27 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         if dampening < 1.0:
             contracts = max(1, int(contracts * dampening))
 
+        # Automatic calibration-aware dampening — same "reduce risk, never
+        # increase it" philosophy as performance dampening above, just
+        # triggered by calibration sample count instead of a losing
+        # streak. Only applies to strategies that actually consume the
+        # calibrated probability model (model_prob is None for
+        # depth_imbalance/favorites/always_trade, which don't use
+        # station-specific calibration at all). CONFIRMED REAL-WORLD
+        # MOTIVATION: see calibration.calibration_dampening_multiplier's
+        # docstring — 20+ trades across nearly every strategy all bought
+        # the same losing side of the same underlying market, every one
+        # with 7-13 calibration samples (below the 20-sample threshold),
+        # because they all share the same underlying weather model and
+        # all made the same mistake simultaneously. This doesn't fully
+        # decorrelate strategies that share a model, but it directly
+        # shrinks the damage when that shared model is wrong for a
+        # specific, unproven station/measure.
+        if model_prob is not None:
+            cal_dampening = calibration.calibration_dampening_multiplier(station_code, measure)
+            if cal_dampening < 1.0:
+                contracts = max(1, int(contracts * cal_dampening))
+
         # Real depth-aware sizing/pricing when the caller fetched the order
         # book this cycle (see the docstring above and depth_sizing.py) —
         # `contracts` above becomes the CEILING this can size up to, not
