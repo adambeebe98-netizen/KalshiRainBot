@@ -264,6 +264,41 @@ class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
         self.assertEqual(temp_row["settled"], 1)
 
 
+class TestHasOpenPositionForEvent(unittest.TestCase):
+    """Foundation for the favorites_baseline same-event fix — see
+    log_shadow_trade's event_ticker column docstring for the confirmed
+    bug this exists to prevent."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_detects_existing_open_exposure(self):
+        storage.log_shadow_trade("favorites_baseline", "T1", "yes", 10, 98,
+                                   event_ticker="KXHIGHTSAN-26SEP11")
+        self.assertTrue(storage.has_open_position_for_event("favorites_baseline", "KXHIGHTSAN-26SEP11"))
+
+    def test_is_scoped_per_strategy(self):
+        storage.log_shadow_trade("favorites_baseline", "T1", "yes", 10, 98,
+                                   event_ticker="KXHIGHTSAN-26SEP11")
+        self.assertFalse(storage.has_open_position_for_event("longshot", "KXHIGHTSAN-26SEP11"))
+
+    def test_is_scoped_per_event(self):
+        storage.log_shadow_trade("favorites_baseline", "T1", "yes", 10, 98,
+                                   event_ticker="KXHIGHTSAN-26SEP11")
+        self.assertFalse(storage.has_open_position_for_event("favorites_baseline", "KXHIGHTSAN-26SEP12"))
+
+    def test_a_settled_position_no_longer_counts(self):
+        tid = storage.log_shadow_trade("favorites_baseline", "T1", "yes", 10, 98,
+                                         event_ticker="KXHIGHTSAN-26SEP11")
+        storage.settle_shadow_trade(tid, won=True, pnl_cents=200)
+        self.assertFalse(storage.has_open_position_for_event("favorites_baseline", "KXHIGHTSAN-26SEP11"))
+
+    def test_missing_event_ticker_fails_open_without_crashing(self):
+        self.assertFalse(storage.has_open_position_for_event("favorites_baseline", ""))
+        self.assertFalse(storage.has_open_position_for_event("favorites_baseline", None))
+
+
 class TestShadowSummaryExclusions(unittest.TestCase):
     def setUp(self):
         storage.init_db()
