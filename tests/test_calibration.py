@@ -135,5 +135,55 @@ class TestIsTrusted(unittest.TestCase):
         self.assertTrue(trusted)
 
 
+class TestCalibrationDampeningMultiplier(unittest.TestCase):
+    """CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found 20+
+    trades across nearly every strategy all buying the same losing side
+    of the same underlying market, every one with 7-13 calibration
+    samples (below the 20-sample threshold) — because nearly every
+    directional strategy shares the same underlying weather model, they
+    all made the same mistake simultaneously and lost together."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM calibration_stats")
+            conn.commit()
+
+    def test_zero_samples_gets_the_most_severe_dampening(self):
+        mult = calibration.calibration_dampening_multiplier("KSEA", "precipitation_daily")
+        self.assertEqual(mult, calibration.CALIBRATION_DAMPENING_ZERO_SAMPLES_MULTIPLIER)
+
+    def test_partial_samples_gets_moderate_dampening(self):
+        """Directly matches the SEA cluster's actual 7-13 sample range."""
+        for _ in range(10):
+            calibration.record_outcome("KSEA", "precipitation_daily", 0.15, False)
+        mult = calibration.calibration_dampening_multiplier("KSEA", "precipitation_daily")
+        self.assertEqual(mult, calibration.CALIBRATION_DAMPENING_PARTIAL_SAMPLES_MULTIPLIER)
+
+    def test_full_threshold_met_gets_no_additional_dampening(self):
+        for _ in range(20):
+            calibration.record_outcome("KSEA", "precipitation_daily", 0.15, False)
+        mult = calibration.calibration_dampening_multiplier("KSEA", "precipitation_daily")
+        self.assertEqual(mult, 1.0)
+
+    def test_missing_station_or_measure_treated_as_zero_samples(self):
+        mult = calibration.calibration_dampening_multiplier(None, "precipitation_daily")
+        self.assertEqual(mult, calibration.CALIBRATION_DAMPENING_ZERO_SAMPLES_MULTIPLIER)
+
+    def test_never_exceeds_1_across_a_wide_sweep(self):
+        """Same safety property as performance_dampening_multiplier: this
+        must provably only ever reduce size, never increase it."""
+        stations = ["KSEA", "KHOU", "KAUS", "KDEN", "KLAS"]
+        for station in stations:
+            for n in range(0, 30):
+                for _ in range(n):
+                    calibration.record_outcome(station, "precipitation_daily", 0.5, True)
+                mult = calibration.calibration_dampening_multiplier(station, "precipitation_daily")
+                self.assertLessEqual(mult, 1.0)
+                with storage.get_conn() as conn:
+                    conn.execute("DELETE FROM calibration_stats WHERE station_code=?", (station,))
+                    conn.commit()
+
+
 if __name__ == "__main__":
     unittest.main()
