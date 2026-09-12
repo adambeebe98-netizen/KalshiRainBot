@@ -580,6 +580,55 @@ class TestFavoritesSameEventLimit(unittest.TestCase):
         self.assertIsNotNone(row)
 
 
+class TestCalibrationAwareDampening(unittest.TestCase):
+    """Direct reproduction of the confirmed real-world scenario: a
+    strategy trading a station/measure with zero or low calibration
+    samples automatically sizes smaller than the same trade at a
+    well-established station — reducing (not eliminating) the damage
+    when the shared weather model is wrong for an unproven case."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_zero_calibration_trade_sizes_smaller_than_full_calibration_trade(self):
+        sig = TradeSignal(ticker="T", side="yes", model_probability=0.85, model_probability_yes=0.85,
+                           market_implied_probability=0.16, edge_cents=30, rationale="test")
+
+        shadow.evaluate_and_log("KXRAIN-SEA", sig, yes_ask=6, no_ask=None,
+                                 station_code="KSEA", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row_zero = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='KXRAIN-SEA'"
+            ).fetchone()
+
+        for i in range(25):
+            calibration.record_outcome("KHOU", "precipitation_daily", 0.85, i % 10 < 8)
+        shadow.evaluate_and_log("KXRAIN-HOU", sig, yes_ask=6, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row_full = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='KXRAIN-HOU'"
+            ).fetchone()
+
+        self.assertIsNotNone(row_zero)
+        self.assertIsNotNone(row_full)
+        self.assertLess(row_zero[0], row_full[0])
+
+    def test_depth_imbalance_is_unaffected_since_it_ignores_the_weather_model(self):
+        shadow.evaluate_and_log("T1", None, yes_ask=45, no_ask=60,
+                                 station_code="KSEA", measure="precipitation_daily",
+                                 yes_bids=[(40, 300)], no_bids=[(50, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT count FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
