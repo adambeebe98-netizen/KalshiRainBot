@@ -7,14 +7,18 @@ band. The calibrated model and arbitrage are never touched here; their
 numbers come from validated risk presets, not a guess waiting to be
 replaced.
 
-CRITICAL BOUNDARY: this module only ever calls storage.log_suggestion().
-It never calls storage.set_override() — that function is only ever called
-from the dashboard's /apply-suggestion route (web_ui/app.py), which only
-runs when a human clicks the button. A model reading its own recent
-results and silently raising its own risk parameters is exactly the
-failure mode this boundary exists to prevent — keeping the write path
-physically separate (different module, different trigger) makes that
-mistake harder to introduce later by accident, not just a rule to remember.
+CRITICAL BOUNDARY: this module never calls storage.set_override() — that
+function is only ever called from the dashboard's /apply-suggestion route
+(web_ui/app.py), which only runs when a human clicks the button. A model
+reading its own recent results and silently raising its own risk
+parameters is exactly the failure mode this boundary exists to prevent —
+keeping the write path physically separate (different module, different
+trigger) makes that mistake harder to introduce later by accident, not
+just a rule to remember. This module DOES also mark a stale pending
+suggestion "superseded" when a fresher one for the same strategy+param
+arrives (see generate_suggestions) — that's queue housekeeping, not a
+behavior change: nothing trades any differently until a human clicks
+Apply on whichever suggestion survives.
 """
 from __future__ import annotations
 
@@ -139,6 +143,27 @@ def generate_suggestions() -> int:
             continue
 
         rationale = str(item.get("rationale", ""))[:500]
+
+        # CONFIRMED BUG this fixes: nothing here checked whether a pending
+        # suggestion for this exact (strategy, param) already existed
+        # before writing a new one. Every advisor run (scheduled or
+        # manually triggered) just appended another row, regardless of
+        # whether an earlier one was still sitting there unactioned —
+        # confirmed live: swing.exit_offset ended up with two pending
+        # suggestions proposing DIFFERENT values (12 and 15) from
+        # different runs, same for swing.entry_max (35 vs 38) and
+        # longshot.min_price (two separate runs both suggesting 5, from
+        # different sample sizes) — a genuinely confusing, contradictory
+        # queue for a human to have to sort through by hand. Now:
+        # superseding an old pending suggestion for the same param is
+        # queue housekeeping, not a behavior change (see this module's
+        # docstring) — at most one pending suggestion per (strategy,
+        # param) at any time, always reflecting the most recent run's
+        # data rather than accumulating stale, contradictory advice.
+        for existing in storage.get_suggestions(status="pending"):
+            if existing["strategy"] == strategy and existing["param"] == param:
+                storage.update_suggestion_status(existing["id"], "superseded")
+
         storage.log_suggestion(strategy, param, current_value, suggested_value, rationale)
         logged += 1
 
