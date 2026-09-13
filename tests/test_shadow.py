@@ -774,6 +774,62 @@ class TestDampeningRationaleAnnotation(unittest.TestCase):
         self.assertEqual(row[0], "base rationale")
 
 
+class TestWeatherFeeAndDepthCapture(unittest.TestCase):
+    """Explicitly requested: 'data is the absolute most important thing to
+    log and store.' End-to-end pipeline test for observed_temp_f,
+    forecast_temp_f, threshold_low_f/high_f, fee_cents_paid, and
+    yes/no_bid_depth_total."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_temperature_trade_captures_weather_and_fee_data(self):
+        sig = TradeSignal(ticker="T1", side="yes", model_probability=0.7, model_probability_yes=0.7,
+                           market_implied_probability=0.4, edge_cents=30, rationale="test",
+                           observed_temp_f=88.0, forecast_temp_f=90.0,
+                           threshold_low_f=85.0, threshold_high_f=95.0)
+        shadow.evaluate_and_log("T1", sig, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="temperature_high")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT observed_temp_f, forecast_temp_f, threshold_low_f, threshold_high_f, "
+                "fee_cents_paid FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T1'"
+            ).fetchone()
+        self.assertEqual(row[0], 88.0)
+        self.assertEqual(row[1], 90.0)
+        self.assertEqual(row[2], 85.0)
+        self.assertEqual(row[3], 95.0)
+        self.assertIsNotNone(row[4])
+        self.assertGreater(row[4], 0)
+
+    def test_depth_totals_captured_when_book_data_available(self):
+        shadow.evaluate_and_log("T2", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(40, 100), (39, 50)], no_bids=[(50, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT yes_bid_depth_total, no_bid_depth_total FROM shadow_trades "
+                "WHERE strategy='depth_imbalance' AND ticker='T2'"
+            ).fetchone()
+        self.assertEqual(row, (150, 20))
+
+    def test_depth_totals_stay_null_without_book_data(self):
+        sig = TradeSignal(ticker="T3", side="yes", model_probability=0.7, model_probability_yes=0.7,
+                           market_implied_probability=0.4, edge_cents=30, rationale="test")
+        shadow.evaluate_and_log("T3", sig, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="temperature_high")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT yes_bid_depth_total, no_bid_depth_total FROM shadow_trades "
+                "WHERE strategy='calibrated_balanced' AND ticker='T3'"
+            ).fetchone()
+        self.assertEqual(row, (None, None))
+
+
 class TestFullDataCaptureForAnalysis(unittest.TestCase):
     """Explicit push this session toward richer data collection for
     calibration/interaction analysis: market_implied_probability,
