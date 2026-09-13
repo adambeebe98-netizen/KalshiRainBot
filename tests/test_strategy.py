@@ -16,6 +16,7 @@ from tests.helpers import use_temp_db
 use_temp_db()
 
 import storage  # noqa: E402
+import calibration  # noqa: E402
 from rules_extractor import MarketRules  # noqa: E402
 from weather_data import StationObservation, PrecipForecast  # noqa: E402
 from strategy import (  # noqa: E402
@@ -260,6 +261,47 @@ class TestEvaluateMarketSideSelection(unittest.TestCase):
         signal = evaluate_market("T7", yes_price_cents=40, rules=rules, observation=obs, forecast=[])
         self.assertGreater(signal.edge_cents, 0)
         self.assertNotIn("no real signal", signal.rationale)
+
+
+class TestRawModelProbabilityCapture(unittest.TestCase):
+    """Found via this session's explicit push toward better data
+    collection for calibration analysis: raw_model_p (before
+    calibration's bias correction) was computed at every real decision
+    but discarded once calibration was applied — TradeSignal only ever
+    returned the calibrated value. Now both are captured, so
+    calibration's actual measured effect is directly queryable instead
+    of needing to be reconstructed from rationale text."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM calibration_stats")
+            conn.commit()
+
+    def test_precip_raw_probability_differs_from_calibrated(self):
+        for _ in range(25):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.5, True)  # pushes bias up
+        rules = make_rules(measure="precipitation_daily")
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=40)]
+        signal = evaluate_market("T1", yes_price_cents=40, rules=rules, observation=obs, forecast=forecast)
+        self.assertEqual(signal.raw_model_probability_yes, 0.40)
+        self.assertNotEqual(signal.model_probability_yes, signal.raw_model_probability_yes)
+
+    def test_temperature_raw_probability_differs_from_calibrated(self):
+        for _ in range(25):
+            calibration.record_outcome("KAUS", "temperature_high", 0.5, True)
+        rules = make_rules(measure="temperature_high", threshold_low_f=80.0, threshold_high_f=90.0)
+        obs = make_observation(temperature_f=85.0)
+        forecast = [make_forecast_period(is_daytime=True, temperature_f=85.0)]
+        signal = evaluate_temperature_market("T2", 40, rules, obs, forecast)
+        self.assertIsNotNone(signal.raw_model_probability_yes)
+        self.assertNotEqual(signal.model_probability_yes, signal.raw_model_probability_yes)
+
+    def test_no_real_signal_case_leaves_raw_probability_none(self):
+        rules = make_rules(measure="precipitation_daily")
+        signal = evaluate_market("T3", yes_price_cents=2, rules=rules, observation=None, forecast=[])
+        self.assertIsNone(signal.raw_model_probability_yes)
 
 
 class TestRainNearCloseDecay(unittest.TestCase):
