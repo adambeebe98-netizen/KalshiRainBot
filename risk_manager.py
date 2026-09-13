@@ -162,6 +162,43 @@ class RiskManager:
         return True, "approved"
 
     def record_fill(self, cost_cents: int) -> None:
+        """
+        cost_cents is accepted but deliberately not used for bankroll
+        math — see the accounting-model note below for why that's
+        correct, not an oversight (confirmed via a static-analysis pass
+        that flagged it as a possibly-unused parameter, then verified
+        directly: a full open->settle cycle nets out to exactly the
+        expected bankroll with no double-counting or missing deduction).
+
+        ACCOUNTING MODEL: bankroll_cents is NOT reduced when a position
+        opens. It only changes in record_settlement, via pnl_cents — the
+        NET profit or loss (payout minus cost for a win, the full cost
+        lost for a loss), not the gross payout. "Deduct cost now, add
+        gross payout later" and "do nothing now, add net change later"
+        are mathematically equivalent as long as pnl_cents is always the
+        net figure, which it is everywhere it's computed. cost_cents
+        stays in the signature because callers already compute it
+        naturally (contracts * price) and a future feature that DOES
+        need per-fill cost (e.g. tracking currently-deployed capital
+        directly) can use it without a signature change.
+
+        IMPORTANT CONSEQUENCE, worth understanding precisely rather than
+        assuming: because bankroll_cents never reflects capital already
+        tied up in open positions, max_contracts_for_trade's
+        max_position_pct check is computed against the FULL bankroll
+        figure every time, regardless of how many other positions are
+        currently open. It bounds risk on any ONE trade, not cumulative
+        exposure across many simultaneously open ones. The real bound on
+        total exposure comes from max_open_positions x
+        max_contracts_per_trade instead — confirmed directly: with this
+        preset's defaults (15 open positions, 25 contracts each, up to
+        90c), the theoretical worst case if every slot filled
+        simultaneously at the maximum price is ~68% of a $500 bankroll.
+        That's well short of blowing up the account, but meaningfully
+        more than what "max_position_pct=10%" alone would suggest to
+        someone reading it as a total-exposure limit rather than a
+        per-trade one.
+        """
         self.state.open_positions_count += 1
 
     def record_settlement(self, pnl_cents: int) -> None:
