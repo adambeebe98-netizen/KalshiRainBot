@@ -780,6 +780,9 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         dampening = performance_dampening_multiplier(perf)
         if dampening < 1.0:
             contracts = max(1, int(contracts * dampening))
+            candidate.rationale += (f"; sized down {int((1-dampening)*100)}% "
+                                     f"(cold streak: {perf['trades']} recent trades, "
+                                     f"{perf['roi_pct']:.1f}% ROI)")
 
         # Automatic calibration-aware dampening — same "reduce risk, never
         # increase it" philosophy as performance dampening above, just
@@ -798,9 +801,13 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         # shrinks the damage when that shared model is wrong for a
         # specific, unproven station/measure.
         if model_prob is not None:
+            cal_n, _, _ = storage.get_calibration_stats(station_code, measure)
             cal_dampening = calibration.calibration_dampening_multiplier(station_code, measure)
             if cal_dampening < 1.0:
                 contracts = max(1, int(contracts * cal_dampening))
+                candidate.rationale += (f"; sized down {int((1-cal_dampening)*100)}% "
+                                         f"(low calibration: {cal_n} samples for "
+                                         f"{station_code}/{measure})")
 
         # Cross-strategy concentration dampening — see
         # concentration_dampening_multiplier's docstring above for the
@@ -814,6 +821,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             conc_dampening = concentration_dampening_multiplier(other_count)
             if conc_dampening < 1.0:
                 contracts = max(1, int(contracts * conc_dampening))
+                candidate.rationale += (f"; sized down {int((1-conc_dampening)*100)}% "
+                                         f"({other_count} other strategies already exposed to this event)")
 
         # Real depth-aware sizing/pricing when the caller fetched the order
         # book this cycle (see the docstring above and depth_sizing.py) —
