@@ -254,6 +254,20 @@ STRATEGIES = {
     "rain_settlement_window": {"kind": "settlement_window", "risk": "balanced",
                                 "category_filter": "Rain", "measure_filter": "precipitation_daily",
                                 "max_hours_until_close": 3.0},
+    # FADE LONGSHOT NEAR CLOSE — sells (buys the expensive opposing side
+    # of) a cheap "lottery ticket" contract specifically in the final
+    # hours before close, when the calibrated model gives the cheap side
+    # almost no real chance. max_price_override=99 is needed because this
+    # strategy deliberately trades the EXPENSIVE side (90-96c), which the
+    # standard 90c ceiling on the "balanced" tier would otherwise block
+    # outright. min_edge_cents_override isn't needed — this DOES claim a
+    # real, calibrated edge (unlike favorites/depth_imbalance), so the
+    # normal fee-survival check correctly applies.
+    "fade_longshot_near_close": {"kind": "fade_longshot_near_close", "risk": "balanced",
+                                  "max_price_override": 99,
+                                  "max_hours_until_close": 4.0,
+                                  "min_fade_price": 4, "max_fade_price": 10,
+                                  "max_cheap_side_probability": 0.05},
     # DEPTH IMBALANCE — a genuinely different signal SOURCE, not another
     # spin on forecast-vs-market-price: heavy resting order-book depth on
     # one side relative to the other, independent of what the weather
@@ -599,6 +613,51 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
             if price is None:
                 continue
             candidate = lib.StrategyCandidate(signal.side, price, signal.edge_cents, signal.rationale)
+            model_prob = signal.model_probability_yes
+
+        elif kind == "fade_longshot_near_close":
+            # Suggested by an external LLM (Gemini) brainstorm, adapted to
+            # this codebase's actual available data and existing signal
+            # infrastructure rather than built from scratch. Genuinely
+            # distinct from two existing strategies it might look similar
+            # to at a glance: longshot BUYS a cheap contract hoping for
+            # the payout; settlement_window trades WHATEVER side/price the
+            # model favors near close. This one specifically FADES a cheap
+            # "lottery ticket" contract (buys the expensive opposing side)
+            # only when close to settlement AND the calibrated model is
+            # highly confident the cheap side won't hit — harvesting the
+            # decay of an overpriced longshot toward its true near-zero
+            # value, not a general calibrated edge at any price point.
+            #
+            # cheap_side_probability uses model_probability (P the TRADED
+            # side wins), not model_probability_yes, specifically because
+            # it needs "probability the OPPOSING (cheap) side wins"
+            # regardless of which side that happens to be — 1 minus the
+            # traded side's own win probability is exactly that, correct
+            # for a "yes" or "no" trade alike.
+            if (not signal or hours_until_close is None
+                    or hours_until_close > cfg.get("max_hours_until_close", 4.0)):
+                continue
+            price = lib.price_for_side(signal.side, yes_ask, no_ask)
+            if price is None:
+                continue
+            # The opposing (cheap) side's approximate price — good enough
+            # as a filter for "is this a lottery-ticket price," not used
+            # as an actual trade price (see strategies_lib.price_for_side's
+            # docstring for why 100-price is NOT accurate enough to price
+            # a real trade with, which doesn't apply here since this is
+            # just a threshold check).
+            opposing_price = 100 - price
+            if not (cfg.get("min_fade_price", 4) <= opposing_price <= cfg.get("max_fade_price", 10)):
+                continue
+            cheap_side_probability = 1 - signal.model_probability
+            if cheap_side_probability > cfg.get("max_cheap_side_probability", 0.05):
+                continue
+            candidate = lib.StrategyCandidate(
+                signal.side, price, signal.edge_cents,
+                f"{signal.rationale}; fading a ~{opposing_price}c longshot near close "
+                f"(model gives it {cheap_side_probability:.1%})",
+            )
             model_prob = signal.model_probability_yes
 
         elif kind == "depth_imbalance":
