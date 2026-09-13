@@ -774,6 +774,72 @@ class TestDampeningRationaleAnnotation(unittest.TestCase):
         self.assertEqual(row[0], "base rationale")
 
 
+class TestFullDataCaptureForAnalysis(unittest.TestCase):
+    """Explicit push this session toward richer data collection for
+    calibration/interaction analysis: market_implied_probability,
+    raw_model_probability, hours_until_close_at_decision, and the three
+    dampening multipliers were all computed at decision time but never
+    stored as queryable columns — only sometimes surfaced as free text in
+    the rationale. Now every trade carries these as structured data."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_model_based_strategy_captures_all_fields(self):
+        for _ in range(25):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.5, True)
+        sig = TradeSignal(ticker="T1", side="yes", model_probability=0.7, model_probability_yes=0.7,
+                           market_implied_probability=0.4, edge_cents=30, rationale="test",
+                           raw_model_probability_yes=0.5)
+        shadow.evaluate_and_log("T1", sig, yes_ask=40, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=2.5)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
+                "performance_dampening_multiplier, calibration_dampening_multiplier, "
+                "concentration_dampening_multiplier FROM shadow_trades "
+                "WHERE strategy='calibrated_balanced' AND ticker='T1'"
+            ).fetchone()
+        self.assertEqual(row, (0.4, 0.5, 2.5, 1.0, 1.0, 1.0))
+
+    def test_non_model_strategy_stores_null_model_fields_but_real_dampening_values(self):
+        shadow.evaluate_and_log("T2", None, yes_ask=95, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT market_implied_probability, raw_model_probability, "
+                "calibration_dampening_multiplier, concentration_dampening_multiplier "
+                "FROM shadow_trades WHERE strategy='favorites_baseline' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNone(row[0])
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], 1.0, "not-applicable dampening should show 1.0, not NULL")
+        self.assertEqual(row[3], 1.0)
+
+    def test_real_dampening_shows_the_actual_multiplier_not_just_1(self):
+        for i in range(20):
+            tid = storage.log_shadow_trade("calibrated_conservative", f"L{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        rm = shadow.get_engines()["calibrated_conservative"]
+        rm.state.realized_pnl_today_cents = 0
+        sig = TradeSignal(ticker="T3", side="yes", model_probability=0.9, model_probability_yes=0.9,
+                           market_implied_probability=0.4, edge_cents=30, rationale="test")
+        shadow.evaluate_and_log("T3", sig, yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT performance_dampening_multiplier FROM shadow_trades "
+                "WHERE strategy='calibrated_conservative' AND ticker='T3'"
+            ).fetchone()
+        self.assertEqual(row[0], 0.5)
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
