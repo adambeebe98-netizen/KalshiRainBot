@@ -45,6 +45,16 @@ class TradeSignal:
     market_implied_probability: float
     edge_cents: int
     rationale: str
+    raw_model_probability_yes: Optional[float] = None  # model_probability_yes BEFORE
+        # calibration.apply_calibration's bias correction — None for has_real_signal=False
+        # cases (no model estimate exists to calibrate in the first place) and for
+        # non-model strategies that never construct a TradeSignal at all (favorites,
+        # depth_imbalance, always_trade). Stored alongside the calibrated value
+        # specifically so calibration's real, measured effect (raw vs calibrated vs
+        # actual outcome) is directly queryable instead of needing to be reconstructed
+        # from rationale text — added because "data is the most important thing" here,
+        # and every trade already computes this number, it just used to be discarded
+        # once calibration was applied.
 
 
 RAIN_NEAR_CLOSE_WINDOW_HOURS = 6.0
@@ -324,6 +334,7 @@ def evaluate_temperature_market(
         market_implied_probability=market_p if side == "yes" else 1 - market_p,
         edge_cents=edge_cents,
         rationale=rationale + confidence_note,
+        raw_model_probability_yes=raw_model_p,
     )
 
 
@@ -382,4 +393,5 @@ def evaluate_market(
         market_implied_probability=market_p if side == "yes" else 1 - market_p,
         edge_cents=edge_cents,
         rationale=rationale + confidence_note,
+        raw_model_probability_yes=raw_model_p,
     )
