@@ -460,6 +460,7 @@ DASHBOARD_PAGE = """
             <div class="position-detail">
               {% if p.exit_target_cents %}<p class="num-inline"><span class="num-label">Goal:</span> sell at {{ p.exit_target_cents }}c</p>{% endif %}
               {% if p.confidence %}<p class="num-inline"><span class="num-label">Confidence:</span> {{ p.confidence }}</p>{% endif %}
+              {% if p.bot_version %}<p class="num-inline"><span class="num-label">Bot version:</span> {{ p.bot_version }}</p>{% endif %}
               {% if p.rationale %}<p class="position-rationale">{{ p.rationale }}</p>{% endif %}
             </div>
           </details>
@@ -632,11 +633,11 @@ DASHBOARD_PAGE = """
       <summary>Recent trades (raw)</summary>
       <div class="sub-body">
         <table class="data-table">
-          <tr><th>Time</th><th>Ticker</th><th>Side</th><th>Count</th><th>Price</th><th>Status</th><th>PnL</th></tr>
+          <tr><th>Time</th><th>Ticker</th><th>Side</th><th>Count</th><th>Price</th><th>Status</th><th>PnL</th><th>Version</th></tr>
           {% for t in trades %}
-          <tr><td>{{ t.time }}</td><td>{{ t.ticker }}</td><td>{{ t.side }}</td><td>{{ t.count }}</td><td>{{ t.price }}c</td><td>{{ t.status }}</td><td>{{ t.pnl }}</td></tr>
+          <tr><td>{{ t.time }}</td><td>{{ t.ticker }}</td><td>{{ t.side }}</td><td>{{ t.count }}</td><td>{{ t.price }}c</td><td>{{ t.status }}</td><td>{{ t.pnl }}</td><td>{{ t.bot_version }}</td></tr>
           {% endfor %}
-          {% if not trades %}<tr><td colspan="7">No trades yet.</td></tr>{% endif %}
+          {% if not trades %}<tr><td colspan="8">No trades yet.</td></tr>{% endif %}
         </table>
       </div>
     </details>
@@ -841,6 +842,7 @@ def dashboard():
                     "time": r["ts"], "ticker": r["ticker"], "side": r["side"],
                     "count": r["count"], "price": r["price_cents"], "status": r["status"],
                     "pnl": r["pnl_cents"] if r["pnl_cents"] is not None else "—",
+                    "bot_version": r["bot_version"] or "—",
                 })
             for r in cur.execute("SELECT * FROM calibration_stats"):
                 n = r["n"]
