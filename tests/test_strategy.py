@@ -263,6 +263,63 @@ class TestEvaluateMarketSideSelection(unittest.TestCase):
         self.assertNotIn("no real signal", signal.rationale)
 
 
+class TestWeatherGroundTruthCapture(unittest.TestCase):
+    """Explicitly requested: 'data is the absolute most important thing to
+    log and store.' observed_temp_f, forecast_temp_f, precip_pop_pct,
+    observed_precip_mm, and threshold_low_f/high_f were all already being
+    computed and used for every real decision, then discarded once folded
+    into a probability number — only a human-readable trace survived in
+    rationale text. Each field should stay None where it genuinely
+    doesn't apply to the market type, not filled with a placeholder."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM calibration_stats")
+            conn.commit()
+
+    def test_temperature_signal_captures_ground_truth_fields(self):
+        rules = make_rules(measure="temperature_high", threshold_low_f=85.0, threshold_high_f=95.0)
+        obs = make_observation(temperature_f=88.0)
+        forecast = [make_forecast_period(is_daytime=True, temperature_f=90.0)]
+        signal = evaluate_temperature_market("T1", 40, rules, obs, forecast, hours_until_close=2.0)
+        self.assertEqual(signal.observed_temp_f, 88.0)
+        self.assertEqual(signal.forecast_temp_f, 90.0)
+        self.assertEqual(signal.threshold_low_f, 85.0)
+        self.assertEqual(signal.threshold_high_f, 95.0)
+        self.assertIsNone(signal.precip_pop_pct)
+        self.assertIsNone(signal.observed_precip_mm)
+
+    def test_temperature_no_real_signal_case_still_captures_ground_truth(self):
+        """Even when no usable forecast/threshold exists to compute a real
+        probability, the raw observation that WAS real should still be
+        captured -- has_real_signal=False is about the derived number,
+        not about whether the ground-truth inputs existed."""
+        rules = make_rules(measure="temperature_high", threshold_low_f=85.0, threshold_high_f=95.0)
+        obs = make_observation(temperature_f=88.0)
+        signal = evaluate_temperature_market("T2", 40, rules, obs, [], hours_until_close=2.0)
+        self.assertEqual(signal.observed_temp_f, 88.0)
+        self.assertIsNone(signal.forecast_temp_f)
+        self.assertEqual(signal.threshold_low_f, 85.0)
+
+    def test_rain_signal_captures_pop_and_observed_precip(self):
+        rules = make_rules(measure="precipitation_daily")
+        obs = make_observation(precipitation_last_hour_mm=None, precipitation_last_3hr_mm=None)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=65)]
+        signal = evaluate_market("T3", 40, rules, obs, forecast)
+        self.assertEqual(signal.precip_pop_pct, 65)
+        self.assertIsNone(signal.observed_precip_mm)
+        self.assertIsNone(signal.observed_temp_f, "temp fields should stay None for a rain market")
+        self.assertIsNone(signal.threshold_low_f)
+
+    def test_rain_with_actual_measured_precip_captures_the_real_mm_value(self):
+        rules = make_rules(measure="precipitation_daily")
+        obs = make_observation(precipitation_last_hour_mm=2.5)
+        forecast = [make_forecast_period(probability_of_precipitation_pct=65)]
+        signal = evaluate_market("T4", 40, rules, obs, forecast)
+        self.assertEqual(signal.observed_precip_mm, 2.5)
+
+
 class TestRawModelProbabilityCapture(unittest.TestCase):
     """Found via this session's explicit push toward better data
     collection for calibration analysis: raw_model_p (before
