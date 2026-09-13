@@ -294,6 +294,36 @@ class TestClearOverride(unittest.TestCase):
         self.assertEqual(overrides["swing"]["entry_max"], 35)
 
 
+class TestBotVersionColumn(unittest.TestCase):
+    """CONFIRMED REAL MOTIVATION: a loss-analysis review flagged a
+    favorites_baseline failure that looked identical to an already-fixed
+    bug, with no way to tell from the trade data alone whether the fix
+    was live yet when the trade happened."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+        _clear("trades")
+
+    def test_shadow_trade_stores_bot_version(self):
+        tid = storage.log_shadow_trade("swing", "T1", "yes", 10, 40, bot_version="abc1234")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT bot_version FROM shadow_trades WHERE id=?", (tid,)).fetchone()
+        self.assertEqual(row[0], "abc1234")
+
+    def test_main_trades_table_stores_bot_version(self):
+        tid = storage.log_trade("T2", "yes", 10, 40, "paper", None, bot_version="abc1234")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT bot_version FROM trades WHERE id=?", (tid,)).fetchone()
+        self.assertEqual(row[0], "abc1234")
+
+    def test_omitting_bot_version_leaves_it_null(self):
+        tid = storage.log_shadow_trade("swing", "T3", "yes", 10, 40)
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT bot_version FROM shadow_trades WHERE id=?", (tid,)).fetchone()
+        self.assertIsNone(row[0])
+
+
 class TestNewAnalysisColumnsSchema(unittest.TestCase):
     """Direct migration-safety test for this session's data-extraction
     push — confirms all six new columns exist after init_db() and that
