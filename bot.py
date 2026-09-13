@@ -599,14 +599,17 @@ def main():
             scan_and_trade(kalshi, extractor, risk, live, current_series)
             storage.snapshot_bankroll(risk.state.bankroll_cents, note="cycle complete")
 
-            # Weekly (by default) Claude-based review — writes suggestions
-            # only, never applies anything. See advisor.py's module docstring
-            # for the boundary this respects.
+            # Weekly (by default) Claude-based review, followed immediately
+            # by auto-applying whatever it suggested — see advisor.py's
+            # module docstring for exactly why that's safe (TUNABLE_PARAMS
+            # is structurally limited to paper-only shadow strategies) and
+            # storage.clear_override() for how to revert anything.
             last_run = float(storage.get_meta("last_advisor_run_ts", "0"))
             if time.time() - last_run > advisor_interval:
                 try:
                     import advisor
                     advisor.generate_suggestions()
+                    advisor.auto_apply_pending_suggestions()
                 except Exception as e:
                     log.warning(f"Advisor run failed (non-fatal, trading continues): {e}")
 
