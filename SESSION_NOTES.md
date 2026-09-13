@@ -6,7 +6,7 @@ here is large enough that "what did we even do" is a real question worth
 having a clean answer to later — for Adam, or for a future Claude session
 picking this back up.
 
-Test suite grew from 224 to 380 tests over the course of this session.
+Test suite grew from 224 to 392 tests over the course of this session.
 Every fix and every new strategy below has direct test coverage; where a
 fix corrects a *confirmed* bug (not a hypothetical one), the tests
 reproduce the exact real-world scenario that surfaced it.
@@ -194,3 +194,37 @@ important rather than optional.
 
 No action needed on any of the above yet — just what's worth looking at
 once there's enough settled data to say something real.
+
+## 7. Data extraction for calibration/interaction analysis
+
+An explicit push, at Adam's direction, toward richer structured data —
+several fields were already computed at decision time but discarded
+before now, or only ever surfaced as free text in rationale. Six new
+columns on `shadow_trades`, all populated automatically with zero change
+to trading behavior:
+
+- **`market_implied_probability`** — the market's own probability
+  estimate at decision time.
+- **`raw_model_probability`** — the model's estimate BEFORE calibration's
+  bias correction, stored alongside the calibrated value
+  (`model_probability`) so calibration's real, measured effect is
+  directly queryable (`raw_model_probability` vs `model_probability` vs
+  actual outcome) instead of reconstructed from rationale text.
+- **`hours_until_close_at_decision`** — how long until settlement when
+  the trade was actually made.
+- **`performance_dampening_multiplier`, `calibration_dampening_multiplier`,
+  `concentration_dampening_multiplier`** — the actual numeric value each
+  dampening layer applied (1.0 = no dampening, correctly distinct from
+  NULL/not-applicable for non-model strategies), not just the rationale
+  text notes.
+
+**Side finding, flagged not fixed**: `arbitrage`'s own code path
+completely bypasses the shared dampening block, despite an existing
+comment claiming dampening applies "uniformly...including arbitrage."
+Worth investigating in a future session — left alone here since it's a
+behavior question, not a data-extraction one.
+
+With this in place, questions like "does the raw-to-calibrated gap
+predict which trades lose" or "does ROI differ when concentration
+dampening kicked in" become plain SQL against real columns, not
+string-parsing against rationale text.
