@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -68,6 +70,45 @@ log = logging.getLogger("kalshi_weather_bot")
 # shadow.evaluate_bracket_set). 30h rather than a strict 24h gives a buffer
 # for markets that close late in the evening rather than at midnight.
 RAIN_MAX_HORIZON_HOURS = 30
+
+
+_CACHED_GIT_COMMIT: str | None = None
+_GIT_COMMIT_LOOKED_UP = False
+
+
+def get_git_commit() -> str | None:
+    """
+    The short git commit hash the currently-running process was started
+    from — computed once (via git rev-parse, run in this file's own
+    directory so it works regardless of the process's working directory)
+    and cached for the life of the process, since it can only change on
+    the next restart anyway. Every trade gets tagged with this, so a
+    later review can answer "was fix X actually live when this trade
+    happened" by looking at the trade itself, not by asking whether a
+    pull+restart happened around the right time — exactly the ambiguity
+    that came up reviewing a favorites_baseline loss that looked
+    identical to an already-fixed bug, with no way to tell from the
+    trade data alone whether the fix was live yet.
+
+    Returns None (not a crash) if git isn't available or this isn't a
+    git checkout — a missing version tag on old/unusual deployments
+    should never take down trading.
+    """
+    global _CACHED_GIT_COMMIT, _GIT_COMMIT_LOOKED_UP
+    if _GIT_COMMIT_LOOKED_UP:
+        return _CACHED_GIT_COMMIT
+    _GIT_COMMIT_LOOKED_UP = True
+    try:
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            _CACHED_GIT_COMMIT = result.stdout.strip() or None
+    except Exception:
+        _CACHED_GIT_COMMIT = None
+    return _CACHED_GIT_COMMIT
 
 
 def hours_until_close(close_time_str: str | None) -> float | None:
@@ -388,7 +429,8 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                                      previous_forecast_temp_f=previous_forecast_temp_f,
                                      yes_bids=yes_bids, no_bids=no_bids,
                                      hours_until_close=hours_until_close(market.get("close_time")),
-                                     yes_bid=m_yes_bid, event_ticker=market.get("event_ticker"))
+                                     yes_bid=m_yes_bid, event_ticker=market.get("event_ticker"),
+                                     bot_version=get_git_commit())
 
             approved, reason = risk.approve_trade(
                 price_cents=(yes_price if signal.side == "yes" else 100 - yes_price),
@@ -467,7 +509,8 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
 
             storage.log_trade(ticker, signal.side, contracts, price, mode, order_id,
                                model_probability=signal.model_probability_yes,
-                               station_code=rules.station_code, measure=rules.measure)
+                               station_code=rules.station_code, measure=rules.measure,
+                               bot_version=get_git_commit())
             risk.record_fill(cost_cents=contracts * price)
 
 
