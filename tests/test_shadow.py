@@ -698,6 +698,82 @@ class TestConcentrationDampeningIntegration(unittest.TestCase):
         self.assertIsNotNone(row, "arbitrage should still trade despite 4 other strategies already exposed")
 
 
+class TestDampeningRationaleAnnotation(unittest.TestCase):
+    """Every dampening mechanism (performance, calibration, concentration)
+    used to silently adjust position size with no trace in the trade's
+    own rationale — a human reading the dashboard had no way to tell
+    WHY a position ended up small. Now each layer appends a plain note
+    when it actually reduces size, so the rationale a person reads is
+    the real reason, not just the base signal text."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def _signal(self, ticker, prob=0.85):
+        return TradeSignal(ticker=ticker, side="yes", model_probability=prob,
+                            model_probability_yes=prob, market_implied_probability=0.16,
+                            edge_cents=30, rationale="base rationale")
+
+    def test_calibration_dampening_note_appears(self):
+        shadow.evaluate_and_log("T1", self._signal("T1"), yes_ask=6, no_ask=None,
+                                 station_code="KSEA", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T1'"
+            ).fetchone()
+        self.assertIn("sized down", row[0])
+        self.assertIn("low calibration", row[0])
+        self.assertIn("KSEA/precipitation_daily", row[0])
+
+    def test_concentration_dampening_note_appears_for_later_strategies(self):
+        for i in range(25):
+            calibration.record_outcome("KSEA", "precipitation_daily", 0.85, i % 10 < 8)
+        shadow.evaluate_and_log("T1", self._signal("T1"), yes_ask=6, no_ask=None,
+                                 station_code="KSEA", measure="precipitation_daily", event_ticker="EVENT1")
+        with storage.get_conn() as conn:
+            rows = conn.execute("SELECT rationale FROM shadow_trades WHERE ticker='T1'").fetchall()
+        self.assertTrue(any("other strategies already exposed" in r[0] for r in rows))
+
+    def test_performance_dampening_note_appears(self):
+        for i in range(20):
+            tid = storage.log_shadow_trade("calibrated_conservative", f"L{i}", "yes", 10, 40)
+            storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        for i in range(25):
+            calibration.record_outcome("KHOU", "precipitation_daily", 0.9, i % 10 < 9)
+        # Isolate the COLD-STREAK dampening specifically: the losses just
+        # logged are real settled history (which is what the dampening
+        # check reads), but without this reset they'd also count as
+        # today's realized P&L and could trip the daily kill switch --
+        # a separate mechanism this test isn't about.
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        rm = shadow.get_engines()["calibrated_conservative"]
+        rm.state.realized_pnl_today_cents = 0
+        shadow.evaluate_and_log("T2", self._signal("T2", prob=0.9), yes_ask=40, no_ask=None,
+                                 station_code="KHOU", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='calibrated_conservative' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("cold streak", row[0])
+
+    def test_a_clean_trade_has_an_unmodified_rationale(self):
+        for i in range(25):
+            calibration.record_outcome("KAUS", "precipitation_daily", 0.9, i % 10 < 9)
+        shadow.evaluate_and_log("T3", self._signal("T3", prob=0.9), yes_ask=6, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT rationale FROM shadow_trades WHERE strategy='calibrated_conservative' AND ticker='T3'"
+            ).fetchone()
+        self.assertEqual(row[0], "base rationale")
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
