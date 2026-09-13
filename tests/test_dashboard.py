@@ -8,6 +8,8 @@ unit test of template internals.
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 import time
 import unittest
@@ -399,6 +401,42 @@ class TestAutoApplyDashboardUI(DashboardTestCase):
                 auto_apply_pending_suggestions=lambda: 1)}):
             resp = _client().post("/control", data={"action": "run_advisor"}, follow_redirects=True)
         self.assertIn("1 auto-applied", resp.get_data(as_text=True))
+
+
+class TestChartIncludesUnrealized(DashboardTestCase):
+    """Explicitly requested: the chart 'only currently charts realized
+    profits... it should be showing and adding in the unrealized $
+    amount.' Every historical point is necessarily realized-only (that's
+    all that was knowable at each past moment), but the final point on
+    each line now folds in the current mark-to-market value of whatever's
+    open, since both pieces are known right now."""
+
+    def test_final_chart_point_equals_realized_plus_unrealized(self):
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        storage.log_price_snapshot("T1", yes_ask=None, yes_bid=55)
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40)  # cost 400c, now worth 550c -> +150c unrealized
+
+        body = _client().get("/").get_data(as_text=True)
+        match = re.search(r"const chartData = (\{.*?\});", body)
+        self.assertIsNotNone(match)
+        chart_data = json.loads(match.group(1))
+
+        swing_points = chart_data["swing"]
+        self.assertEqual(len(swing_points), 2, "one historical snapshot plus one appended current-total point")
+        self.assertEqual(swing_points[-1][1], 50150, "realized 50000c + unrealized 150c")
+
+    def test_a_strategy_with_no_open_positions_still_gets_a_current_point_matching_bankroll(self):
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        match = re.search(r"const chartData = (\{.*?\});", body)
+        chart_data = json.loads(match.group(1))
+        swing_points = chart_data["swing"]
+        self.assertEqual(swing_points[-1][1], 50000, "no unrealized component -- final point equals plain bankroll")
+
+    def test_clarifying_caption_is_present(self):
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("final point on each line also folds in whatever", body)
 
 
 class TestBotVersionDisplay(DashboardTestCase):
