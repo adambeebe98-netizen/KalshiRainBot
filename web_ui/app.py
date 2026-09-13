@@ -420,6 +420,7 @@ DASHBOARD_PAGE = """
     <span class="count-badge">{{ open_positions_total }} open</span>
   </div>
   <p class="subtext">All paper — none of these place real orders. Click a strategy for its current positions and the reasoning behind each one.{% if open_positions_total > open_positions|length %} (showing the most recent {{ open_positions|length }} of {{ open_positions_total }} open positions across all strategies){% endif %}</p>
+  <p class="subtext" style="margin-top:-8px;">Chart lines are realized bankroll history — the final point on each line also folds in whatever's currently open, marked to its live price.</p>
   <canvas id="strategyChart" height="90"></canvas>
   <div class="position-groups" style="margin-top:16px;">
     {% for s in shadow_summary %}
@@ -886,10 +887,22 @@ def dashboard():
             s["dampened"] = shadow.performance_dampening_multiplier(perf) < 1.0
         category_summary = storage.get_shadow_summary_by_category()
         engines = shadow.get_engines()
+        now_ts = int(time.time())
         for s in shadow_summary:
             history = storage.get_shadow_bankroll_history(s["strategy"], limit=500)
             if history:
                 chart_data[s["strategy"]] = [[ts, cents] for ts, cents in history]
+                # Extend with one final point reflecting the TRUE current
+                # total (realized bankroll + whatever open positions are
+                # worth right now), not just the last settled snapshot —
+                # every historical point above is necessarily realized-only
+                # (that's all that was knowable at that past moment), but
+                # right now we know both, so the most recent point should
+                # show the full picture. Explicitly requested: the chart
+                # "only currently charts realized profits... it should be
+                # showing and adding in the unrealized $ amount."
+                current_total_cents = (s["bankroll_cents"] or 0) + (s["unrealized_pnl_cents"] or 0)
+                chart_data[s["strategy"]].append([now_ts, current_total_cents])
             s["trend"] = _trend_arrow(history)
             rm = engines.get(s["strategy"])
             s["kill_switched"] = bool(rm and rm.state.is_kill_switch_tripped(rm.preset.max_daily_loss_pct))
