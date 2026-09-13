@@ -85,6 +85,35 @@ test reproducing the original failure.
    possible without live-data confirmation of NWS's actual encoding.
    Documented as a known limitation rather than guessed at.
 
+## 2b. Audit findings (no behavior change — documentation and permanent tests only)
+
+A static-analysis pass across the core modules, looking for the same
+"accepted but silently unused parameter" pattern that caused the
+`observed_temp_f`/`trace_counts_as_zero` bugs above, surfaced one more
+worth understanding precisely:
+
+- **`RiskManager.record_fill`'s `cost_cents` parameter is genuinely
+  unused for bankroll math — verified directly, not a bug.** Bankroll
+  only changes at settlement via the NET pnl_cents figure; deducting
+  cost at entry and adding gross payout at exit would be mathematically
+  equivalent, so doing neither at entry and adding the net figure at
+  exit nets out correctly (confirmed with a real open→settle trace).
+  **The real, worth-knowing consequence**: `max_position_pct` bounds risk
+  on any ONE trade against a static bankroll figure, not cumulative
+  exposure across many simultaneously open positions. The actual bound
+  on total exposure comes from `max_open_positions × max_contracts_per_trade`
+  instead — with this preset's defaults, that theoretical worst case
+  (every slot filled simultaneously at the max price) works out to
+  roughly 68% of a $500 bankroll, not obviously implied by
+  `max_position_pct` alone. Documented thoroughly in `record_fill`'s
+  docstring and covered by permanent regression tests
+  (`TestBankrollAccountingModel`) so this can't silently break later
+  without a test catching it. No behavior was changed — this was a
+  verify-and-document pass, not a fix, since the existing caps already
+  provide a survivable (if not razor-tight) backstop and changing core
+  bankroll/sizing math deserves its own dedicated, carefully-considered
+  session rather than being folded into this one.
+
 ## 3. Core model improvements (affect every existing strategy, not just new ones)
 
 - **Temperature**: `observed_temp_f` used to be accepted by
