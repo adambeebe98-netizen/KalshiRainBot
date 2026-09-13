@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl_cents INTEGER,
     model_probability REAL,      -- the (pre-calibration-adjusted) probability behind this trade
     station_code TEXT,           -- settlement station, for calibration lookups
-    measure TEXT                 -- 'precipitation_daily' etc, for calibration lookups
+    measure TEXT,                -- 'precipitation_daily' etc, for calibration lookups
+    bot_version TEXT             -- the short git commit hash the bot was running at decision
+                                   -- time (see bot.get_git_commit and shadow_trades' matching
+                                   -- column for the full reasoning)
 );
 
 CREATE TABLE IF NOT EXISTS bankroll_snapshots (
@@ -124,6 +127,14 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
                                                 -- differ when calibration dampening kicked in"
                                                 -- a plain GROUP BY instead of a fragile LIKE
                                                 -- query against free text.
+    bot_version TEXT,              -- the short git commit hash the bot was running at decision
+                                     -- time (see bot.get_git_commit) — lets a later review answer
+                                     -- "was fix X actually live when this trade happened" from the
+                                     -- trade data itself, instead of having to separately ask
+                                     -- whether a pull+restart happened at the right time. Real
+                                     -- motivation: a favorites_baseline loss that looked identical
+                                     -- to an already-fixed bug, with no way to tell from the trade
+                                     -- alone whether the fix was live yet.
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -241,6 +252,8 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN performance_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN calibration_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN concentration_dampening_multiplier REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN bot_version TEXT",
+        "ALTER TABLE trades ADD COLUMN bot_version TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -278,13 +291,14 @@ def log_decision(ticker: str, side: str, market_price_cents: int, model_probabil
 
 def log_trade(ticker: str, side: str, count: int, price_cents: int, mode: str,
               order_id: str | None, model_probability: float | None = None,
-              station_code: str | None = None, measure: str | None = None) -> int:
+              station_code: str | None = None, measure: str | None = None,
+              bot_version: str | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO trades (ts, ticker, side, count, price_cents, mode, order_id, "
-            "model_probability, station_code, measure) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "model_probability, station_code, measure, bot_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), ticker, side, count, price_cents, mode, order_id,
-             model_probability, station_code, measure),
+             model_probability, station_code, measure, bot_version),
         )
         return cur.lastrowid
 
@@ -379,7 +393,8 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       hours_until_close_at_decision: float | None = None,
                       performance_dampening_multiplier: float | None = None,
                       calibration_dampening_multiplier: float | None = None,
-                      concentration_dampening_multiplier: float | None = None) -> int:
+                      concentration_dampening_multiplier: float | None = None,
+                      bot_version: str | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
@@ -387,14 +402,14 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
             "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker, "
             "market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
             "performance_dampening_multiplier, calibration_dampening_multiplier, "
-            "concentration_dampening_multiplier) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "concentration_dampening_multiplier, bot_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
              precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker,
              market_implied_probability, raw_model_probability, hours_until_close_at_decision,
              performance_dampening_multiplier, calibration_dampening_multiplier,
-             concentration_dampening_multiplier),
+             concentration_dampening_multiplier, bot_version),
         )
         return cur.lastrowid
 
@@ -747,7 +762,7 @@ def get_open_positions_detail(limit: int = 300) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, ts, strategy, ticker, side, count, price_cents, model_probability, "
-            "station_code, measure, exit_target_cents, rationale, confidence "
+            "station_code, measure, exit_target_cents, rationale, confidence, bot_version "
             "FROM shadow_trades WHERE status='open' ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
