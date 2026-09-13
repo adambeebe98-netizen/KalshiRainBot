@@ -264,6 +264,50 @@ class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
         self.assertEqual(temp_row["settled"], 1)
 
 
+class TestNewAnalysisColumnsSchema(unittest.TestCase):
+    """Direct migration-safety test for this session's data-extraction
+    push — confirms all six new columns exist after init_db() and that
+    log_shadow_trade correctly stores and retrieves each one."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_all_new_columns_exist_after_init_db(self):
+        with storage.get_conn() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(shadow_trades)")}
+        for c in ["market_implied_probability", "raw_model_probability",
+                  "hours_until_close_at_decision", "performance_dampening_multiplier",
+                  "calibration_dampening_multiplier", "concentration_dampening_multiplier"]:
+            self.assertIn(c, cols)
+
+    def test_log_shadow_trade_stores_and_retrieves_all_new_fields(self):
+        tid = storage.log_shadow_trade(
+            "calibrated_balanced", "T1", "yes", 10, 40,
+            market_implied_probability=0.4, raw_model_probability=0.4,
+            hours_until_close_at_decision=2.5,
+            performance_dampening_multiplier=0.5,
+            calibration_dampening_multiplier=1.0,
+            concentration_dampening_multiplier=0.5,
+        )
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
+                "performance_dampening_multiplier, calibration_dampening_multiplier, "
+                "concentration_dampening_multiplier FROM shadow_trades WHERE id=?", (tid,)
+            ).fetchone()
+        self.assertEqual(row, (0.4, 0.4, 2.5, 0.5, 1.0, 0.5))
+
+    def test_omitting_the_new_fields_leaves_them_null_not_an_error(self):
+        tid = storage.log_shadow_trade("favorites_baseline", "T2", "yes", 10, 95)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT market_implied_probability, raw_model_probability "
+                "FROM shadow_trades WHERE id=?", (tid,)
+            ).fetchone()
+        self.assertEqual(row, (None, None))
+
+
 class TestCountDistinctStrategiesExposedToEvent(unittest.TestCase):
     """Foundation for shadow.py's concentration dampening — see its
     docstring for the confirmed real-world motivation (20+ trades across
