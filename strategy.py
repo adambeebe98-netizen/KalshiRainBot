@@ -55,6 +55,19 @@ class TradeSignal:
         # from rationale text — added because "data is the most important thing" here,
         # and every trade already computes this number, it just used to be discarded
         # once calibration was applied.
+    observed_temp_f: Optional[float] = None       # the RAW ground-truth inputs the model
+    forecast_temp_f: Optional[float] = None        # actually consumed to produce the
+    precip_pop_pct: Optional[float] = None         # probability above — same motivation as
+    observed_precip_mm: Optional[float] = None     # raw_model_probability_yes: these were
+    threshold_low_f: Optional[float] = None        # already being computed and used for every
+    threshold_high_f: Optional[float] = None       # real decision, then discarded once folded
+        # into a probability number, with only a human-readable trace surviving in
+        # rationale text. Explicitly requested: "data is the absolute most important
+        # thing to log and store." Each field stays None where it genuinely doesn't apply
+        # (e.g. threshold_low_f/high_f for a rain market, which has no numeric threshold
+        # in the same sense a temperature bracket does) rather than being filled with a
+        # placeholder — a NULL here means "not applicable to this market type," not
+        # "data was lost."
 
 
 RAIN_NEAR_CLOSE_WINDOW_HOURS = 6.0
@@ -303,6 +316,8 @@ def evaluate_temperature_market(
             edge_cents=0,
             rationale=f"{rationale}; no real signal, edge forced to 0 "
                       f"[rules confidence: {rules.confidence}, source: {rules.settlement_source}]",
+            observed_temp_f=observed_temp_f, forecast_temp_f=forecast_temp_f,
+            threshold_low_f=rules.threshold_low_f, threshold_high_f=rules.threshold_high_f,
         )
 
     model_p, calibration_note = calibration.apply_calibration(
@@ -335,6 +350,8 @@ def evaluate_temperature_market(
         edge_cents=edge_cents,
         rationale=rationale + confidence_note,
         raw_model_probability_yes=raw_model_p,
+        observed_temp_f=observed_temp_f, forecast_temp_f=forecast_temp_f,
+        threshold_low_f=rules.threshold_low_f, threshold_high_f=rules.threshold_high_f,
     )
 
 
@@ -350,6 +367,21 @@ def evaluate_market(
         observation, forecast, rules.trace_counts_as_zero, hours_until_close=hours_until_close
     )
 
+    # Recomputed independently here rather than having
+    # estimate_precip_probability return them directly — its return
+    # signature is small, well-tested, and used by several callers;
+    # duplicating this simple extraction is lower-risk than changing it.
+    # Matches that function's own logic exactly: last-hour reading if
+    # present, otherwise last-3hr; POP is the max across the next two
+    # forecast periods, since the contract only needs ONE measurable
+    # event, not persistent rain across every period.
+    observed_precip_mm = None
+    if observation:
+        observed_precip_mm = observation.precipitation_last_hour_mm or observation.precipitation_last_3hr_mm
+    relevant_pops = [f.probability_of_precipitation_pct for f in forecast[:2]
+                      if f.probability_of_precipitation_pct is not None]
+    precip_pop_pct = max(relevant_pops) if relevant_pops else None
+
     if not has_real_signal:
         # Same fix as evaluate_temperature_market — see its comment for
         # the full reasoning and the confirmed live example of this bug.
@@ -359,6 +391,7 @@ def evaluate_market(
             edge_cents=0,
             rationale=f"{rationale}; no real signal, edge forced to 0 "
                       f"[rules confidence: {rules.confidence}, source: {rules.settlement_source}]",
+            observed_precip_mm=observed_precip_mm, precip_pop_pct=precip_pop_pct,
         )
 
     # Apply the learned per-station calibration bias (see calibration.py).
@@ -394,4 +427,5 @@ def evaluate_market(
         edge_cents=edge_cents,
         rationale=rationale + confidence_note,
         raw_model_probability_yes=raw_model_p,
+        observed_precip_mm=observed_precip_mm, precip_pop_pct=precip_pop_pct,
     )
