@@ -488,7 +488,25 @@ DASHBOARD_PAGE = """
 
 <section class="panel">
   <h2>Suggestions</h2>
-  <p class="subtext">Claude's weekly review of swing/favorites/longshot thresholds — nothing changes until you click Apply.</p>
+  <p class="subtext">Claude's weekly review of swing/favorites/longshot thresholds — these auto-apply immediately, no click needed. Revert anything below back to its default if you disagree with it.</p>
+
+  {% if active_overrides %}
+  <h3 style="font-size:14px;margin:16px 0 8px;">Currently active overrides</h3>
+  {% for strat, params in active_overrides.items() %}
+    {% for param, value in params.items() %}
+    <div class="suggestion-card">
+      <strong>{{ strat }}.{{ param }}</strong>: currently {{ value }}
+      <form method="post" action="/revert_override" style="display:inline; margin-left:8px;">
+        <input type="hidden" name="strategy" value="{{ strat }}"><input type="hidden" name="param" value="{{ param }}">
+        <button type="submit" class="secondary">Revert to default</button>
+      </form>
+    </div>
+    {% endfor %}
+  {% endfor %}
+  {% endif %}
+
+  {% if suggestions %}
+  <h3 style="font-size:14px;margin:16px 0 8px;">Pending (couldn't auto-apply — needs a look)</h3>
   {% for s in suggestions %}
   <div class="suggestion-card">
     <strong>{{ s.strategy }}.{{ s.param }}</strong>: {{ s.current_value }} → {{ s.suggested_value }}
@@ -503,7 +521,18 @@ DASHBOARD_PAGE = """
     </form>
   </div>
   {% endfor %}
-  {% if not suggestions %}<p class="empty-state">No pending suggestions right now.</p>{% endif %}
+  {% endif %}
+
+  <h3 style="font-size:14px;margin:16px 0 8px;">Recently auto-applied</h3>
+  {% for s in auto_applied_suggestions %}
+  <div class="suggestion-card">
+    <strong>{{ s.strategy }}.{{ s.param }}</strong>: {{ s.current_value }} → {{ s.suggested_value }}
+    <p class="subtext" style="margin:6px 0;">{{ s.rationale }}</p>
+  </div>
+  {% endfor %}
+  {% if not suggestions and not auto_applied_suggestions and not active_overrides %}
+  <p class="empty-state">No suggestions yet — needs at least 15 settled trades per strategy before advisor has enough to go on.</p>
+  {% endif %}
 </section>
 
 <details class="mega">
@@ -924,6 +953,8 @@ def dashboard():
         open_markets=open_markets,
         decision_summary=decision_summary,
         suggestions=storage.get_suggestions(status="pending"),
+        auto_applied_suggestions=storage.get_suggestions(status="auto_applied")[:10],
+        active_overrides=storage.get_overrides(),
         latest_retrospective=latest_retrospective,
         edge_buckets=edge_buckets,
         confidence_breakdown=confidence_breakdown,
@@ -968,6 +999,22 @@ def suggestion_action():
         msg = "Suggestion dismissed."
 
     return redirect(url_for("dashboard", message=msg))
+
+
+@app.route("/revert_override", methods=["POST"])
+def revert_override():
+    """Undoes a single auto-applied (or manually-applied) override,
+    reverting that one parameter back to its hardcoded default. The
+    safety valve paired with advisor.auto_apply_pending_suggestions —
+    nothing requires approval before a suggestion takes effect anymore,
+    but anything can be undone here with one click."""
+    strategy = request.form.get("strategy", "")
+    param = request.form.get("param", "")
+    if not strategy or not param:
+        return redirect(url_for("dashboard", message="Missing strategy or param — nothing reverted."))
+    storage.clear_override(strategy, param)
+    restart_bot()
+    return redirect(url_for("dashboard", message=f"Reverted {strategy}.{param} to its default. Bot restarted."))
 
 
 @app.route("/setup", methods=["POST"])
@@ -1024,7 +1071,8 @@ def control():
         try:
             import advisor
             count = advisor.generate_suggestions()
-            msg = f"Advisor run complete — {count} new suggestion(s)."
+            applied = advisor.auto_apply_pending_suggestions()
+            msg = f"Advisor run complete — {count} new suggestion(s), {applied} auto-applied."
         except Exception as e:
             msg = f"Advisor run failed: {e}"
     elif action == "run_retrospective":
