@@ -168,5 +168,45 @@ class TestApproveTrade(unittest.TestCase):
         self.assertTrue(approved)
 
 
+class TestBankrollAccountingModel(unittest.TestCase):
+    """Found via a static-analysis pass flagging record_fill's cost_cents
+    as a possibly-unused parameter. Verified directly rather than
+    assumed: bankroll_cents is deliberately NOT reduced when a position
+    opens — it only changes at settlement, via the NET pnl_cents figure.
+    "Deduct cost now, add gross payout later" and "do nothing now, add
+    net change later" are equivalent as long as pnl_cents is always the
+    net figure. These tests encode that verification permanently, so a
+    future change can't silently break the invariant without a test
+    catching it."""
+
+    def test_a_winning_trade_nets_out_to_exactly_the_expected_profit(self):
+        rm = RiskManager(RiskState(bankroll_cents=50000, day=date.today()), make_preset())
+        rm.record_fill(cost_cents=400)  # 10 contracts @ 40c
+        self.assertEqual(rm.state.bankroll_cents, 50000, "opening a position must not change bankroll_cents")
+        rm.record_settlement(pnl_cents=600)  # payout 1000c - cost 400c = 600c net
+        self.assertEqual(rm.state.bankroll_cents, 50600)
+
+    def test_a_losing_trade_nets_out_to_exactly_the_expected_loss(self):
+        rm = RiskManager(RiskState(bankroll_cents=50000, day=date.today()), make_preset())
+        rm.record_fill(cost_cents=400)
+        rm.record_settlement(pnl_cents=-400)  # lost the full stake
+        self.assertEqual(rm.state.bankroll_cents, 49600)
+
+    def test_sizing_does_not_account_for_capital_already_deployed(self):
+        """Documents the real, understood consequence of the accounting
+        model above: max_position_pct bounds risk on any ONE trade
+        against the static bankroll figure, not cumulative exposure
+        across many simultaneously open positions. The actual bound on
+        total exposure comes from max_open_positions x
+        max_contracts_per_trade instead — see record_fill's docstring."""
+        rm = RiskManager(RiskState(bankroll_cents=50000, day=date.today()),
+                          make_preset(max_position_pct=0.1, max_contracts_per_trade=25))
+        size_before_any_fills = rm.max_contracts_for_trade(price_cents=40)
+        for _ in range(6):
+            rm.record_fill(cost_cents=size_before_any_fills * 40)
+        size_with_6_open = rm.max_contracts_for_trade(price_cents=40)
+        self.assertEqual(size_before_any_fills, size_with_6_open)
+
+
 if __name__ == "__main__":
     unittest.main()
