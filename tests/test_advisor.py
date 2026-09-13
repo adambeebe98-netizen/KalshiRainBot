@@ -256,5 +256,53 @@ class TestSuggestionDeduplication(unittest.TestCase):
         self.assertEqual(len(pending), 2, "unrelated (strategy, param) pairs must not supersede each other")
 
 
+class TestAutoApplyPendingSuggestions(unittest.TestCase):
+    """Auto-apply was explicitly requested ("it shouldn't need my input for
+    the bot to get better over time") and is safe specifically because
+    TUNABLE_PARAMS is structurally limited to paper-only shadow strategies
+    (swing, favorites_baseline, longshot) — see auto_apply_pending_suggestions'
+    own docstring for the full reasoning."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "suggestions", "strategy_overrides")
+
+    def test_a_valid_pending_suggestion_gets_applied(self):
+        real_current = shadow.ACTIVE_STRATEGIES["swing"]["exit_offset"]
+        storage.log_suggestion("swing", "exit_offset", real_current, 12, "test rationale")
+        applied = advisor.auto_apply_pending_suggestions()
+        self.assertEqual(applied, 1)
+        overrides = storage.get_overrides()
+        self.assertEqual(overrides["swing"]["exit_offset"], 12)
+        self.assertEqual(len(storage.get_suggestions(status="pending")), 0)
+        self.assertEqual(len(storage.get_suggestions(status="auto_applied")), 1)
+
+    def test_a_stale_suggestion_is_skipped_not_applied(self):
+        """current_value no longer matching reality (e.g. because
+        something else changed the config since the suggestion was
+        generated) must never be silently applied on a wrong premise."""
+        storage.log_suggestion("longshot", "min_price", 2.0, 5.0, "test rationale")
+        storage.set_override("longshot", "min_price", 3.0)
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        applied = advisor.auto_apply_pending_suggestions()
+        self.assertEqual(applied, 0)
+        self.assertEqual(len(storage.get_suggestions(status="stale")), 1)
+        self.assertEqual(len(storage.get_suggestions(status="pending")), 0)
+
+    def test_no_pending_suggestions_applies_nothing(self):
+        applied = advisor.auto_apply_pending_suggestions()
+        self.assertEqual(applied, 0)
+
+    def test_multiple_valid_pending_suggestions_all_get_applied(self):
+        swing_current = shadow.ACTIVE_STRATEGIES["swing"]["exit_offset"]
+        longshot_current = shadow.ACTIVE_STRATEGIES["longshot"]["min_price"]
+        storage.log_suggestion("swing", "exit_offset", swing_current, 12, "a")
+        storage.log_suggestion("longshot", "min_price", longshot_current, 5, "b")
+        applied = advisor.auto_apply_pending_suggestions()
+        self.assertEqual(applied, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
