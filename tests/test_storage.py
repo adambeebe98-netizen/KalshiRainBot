@@ -264,6 +264,36 @@ class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
         self.assertEqual(temp_row["settled"], 1)
 
 
+class TestClearOverride(unittest.TestCase):
+    """The safety valve paired with advisor.auto_apply_pending_suggestions
+    (see that function's docstring) — nothing requires a human to approve
+    a suggestion before it takes effect anymore, but anything can be
+    reverted to its hardcoded default with one call."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM strategy_overrides")
+            conn.commit()
+
+    def test_clears_an_existing_override(self):
+        storage.set_override("swing", "exit_offset", 12)
+        storage.clear_override("swing", "exit_offset")
+        overrides = storage.get_overrides()
+        self.assertNotIn("exit_offset", overrides.get("swing", {}))
+
+    def test_clearing_a_nonexistent_override_is_a_safe_noop(self):
+        storage.clear_override("longshot", "min_price")  # never set
+
+    def test_clearing_one_param_leaves_others_for_the_same_strategy_intact(self):
+        storage.set_override("swing", "exit_offset", 12)
+        storage.set_override("swing", "entry_max", 35)
+        storage.clear_override("swing", "exit_offset")
+        overrides = storage.get_overrides()
+        self.assertNotIn("exit_offset", overrides.get("swing", {}))
+        self.assertEqual(overrides["swing"]["entry_max"], 35)
+
+
 class TestNewAnalysisColumnsSchema(unittest.TestCase):
     """Direct migration-safety test for this session's data-extraction
     push — confirms all six new columns exist after init_db() and that
