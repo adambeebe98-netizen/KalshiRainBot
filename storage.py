@@ -1192,7 +1192,12 @@ def get_price_history(ticker: str, limit: int = 500) -> list[dict]:
 # ---------- strategy overrides & advisor suggestions ----------
 
 def get_overrides() -> dict[str, dict[str, float]]:
-    """{strategy: {param: value}} for every human-approved override currently active."""
+    """{strategy: {param: value}} for every override currently active —
+    either auto-applied by advisor.auto_apply_pending_suggestions or set
+    directly. "Human-approved" no longer describes every row here since
+    auto-apply was introduced for TUNABLE_PARAMS (paper-only shadow
+    strategies, never real-money settings — see that constant's own
+    docstring for why that boundary is structural, not just a rule)."""
     with get_conn() as conn:
         rows = conn.execute("SELECT strategy, param, value FROM strategy_overrides").fetchall()
     result: dict[str, dict[str, float]] = {}
@@ -1208,6 +1213,20 @@ def set_override(strategy: str, param: str, value: float) -> None:
             "ON CONFLICT(strategy, param) DO UPDATE SET value=excluded.value, applied_ts=excluded.applied_ts",
             (strategy, param, value, int(time.time())),
         )
+
+
+def clear_override(strategy: str, param: str) -> None:
+    """
+    Reverts a single tunable parameter back to its hardcoded default by
+    removing its row from strategy_overrides — the safety valve paired
+    with auto-apply (see advisor.auto_apply_pending_suggestions): nothing
+    requires a human to approve a suggestion before it takes effect
+    anymore, but anything auto-applied can be undone with one call.
+    Silently a no-op if no override exists for this (strategy, param) —
+    reverting something already at its default isn't an error.
+    """
+    with get_conn() as conn:
+        conn.execute("DELETE FROM strategy_overrides WHERE strategy=? AND param=?", (strategy, param))
 
 
 def log_suggestion(strategy: str, param: str, current_value: float, suggested_value: float,
