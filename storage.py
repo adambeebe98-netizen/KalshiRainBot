@@ -97,6 +97,33 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
                                    -- temperature event simultaneously (its rule — buy anything
                                    -- priced >=95c — had no concept of "already exposed to this
                                    -- event"), losing all four (~4410c combined, confirmed live).
+    market_implied_probability REAL,  -- the market's own implied probability of the traded
+                                        -- side at decision time (yes_price/100, side-adjusted
+                                        -- same as model_probability) — was already computed for
+                                        -- every trade, just never stored. Directly comparable
+                                        -- against model_probability to see the real, realized gap
+                                        -- our edge claims were based on, not just the edge_cents
+                                        -- number derived from it.
+    raw_model_probability REAL,   -- model_probability_yes BEFORE calibration's bias correction —
+                                    -- NULL for has_real_signal=False cases (no real estimate to
+                                    -- calibrate) and non-model strategies (favorites,
+                                    -- depth_imbalance, always_trade). Stored alongside the
+                                    -- calibrated value so calibration's real, measured effect is
+                                    -- directly queryable instead of reconstructed from rationale
+                                    -- text.
+    hours_until_close_at_decision REAL,  -- how long until this market's close, at the moment
+                                           -- this specific trade was decided — lets analysis
+                                           -- check whether trades made close to settlement really
+                                           -- do perform differently, not just the
+                                           -- settlement_window strategies that deliberately gate
+                                           -- on it.
+    performance_dampening_multiplier REAL,   -- the actual multiplier applied by each dampening
+    calibration_dampening_multiplier REAL,    -- layer at decision time (1.0 = no dampening).
+    concentration_dampening_multiplier REAL,  -- Structured columns, not just the rationale text
+                                                -- notes these already produce — makes "does ROI
+                                                -- differ when calibration dampening kicked in"
+                                                -- a plain GROUP BY instead of a fragile LIKE
+                                                -- query against free text.
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -208,6 +235,12 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN rationale TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN confidence TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN event_ticker TEXT",
+        "ALTER TABLE shadow_trades ADD COLUMN market_implied_probability REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN raw_model_probability REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN hours_until_close_at_decision REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN performance_dampening_multiplier REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN calibration_dampening_multiplier REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN concentration_dampening_multiplier REAL",
     ):
         try:
             conn.execute(stmt)
@@ -340,16 +373,28 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       sample_member_ticker: str | None = None,
                       rationale: str | None = None,
                       confidence: str | None = None,
-                      event_ticker: str | None = None) -> int:
+                      event_ticker: str | None = None,
+                      market_implied_probability: float | None = None,
+                      raw_model_probability: float | None = None,
+                      hours_until_close_at_decision: float | None = None,
+                      performance_dampening_multiplier: float | None = None,
+                      calibration_dampening_multiplier: float | None = None,
+                      concentration_dampening_multiplier: float | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
             "model_probability, station_code, measure, exit_target_cents, "
-            "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker, "
+            "market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
+            "performance_dampening_multiplier, calibration_dampening_multiplier, "
+            "concentration_dampening_multiplier) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
-             precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker),
+             precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker,
+             market_implied_probability, raw_model_probability, hours_until_close_at_decision,
+             performance_dampening_multiplier, calibration_dampening_multiplier,
+             concentration_dampening_multiplier),
         )
         return cur.lastrowid
 
