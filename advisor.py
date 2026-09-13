@@ -7,18 +7,29 @@ band. The calibrated model and arbitrage are never touched here; their
 numbers come from validated risk presets, not a guess waiting to be
 replaced.
 
-CRITICAL BOUNDARY: this module never calls storage.set_override() — that
-function is only ever called from the dashboard's /apply-suggestion route
-(web_ui/app.py), which only runs when a human clicks the button. A model
-reading its own recent results and silently raising its own risk
-parameters is exactly the failure mode this boundary exists to prevent —
-keeping the write path physically separate (different module, different
-trigger) makes that mistake harder to introduce later by accident, not
-just a rule to remember. This module DOES also mark a stale pending
-suggestion "superseded" when a fresher one for the same strategy+param
-arrives (see generate_suggestions) — that's queue housekeeping, not a
-behavior change: nothing trades any differently until a human clicks
-Apply on whichever suggestion survives.
+CRITICAL BOUNDARY: this module never applies its own suggestions inline
+inside generate_suggestions() — the write to storage.set_override()
+happens only in the separate auto_apply_pending_suggestions() function
+below, called explicitly after generate_suggestions() at each call site.
+A model reading its own recent results and silently raising its own risk
+parameters is exactly the failure mode a boundary like this guards
+against — keeping the write a distinct, visible step (different
+function, called separately) makes that mistake harder to introduce by
+accident, not just a rule to remember.
+
+As of the session this was added in, auto-apply IS enabled for
+TUNABLE_PARAMS specifically because that set is structurally limited to paper-only
+shadow strategies (swing, favorites_baseline, longshot) — see
+shadow.TUNABLE_PARAMS' own docstring. Those strategies never place a
+real order regardless of the main bot's live/paper status, so there is
+no pathway from this module to real money; Adam explicitly requested
+this ("it shouldn't need my input for the bot to get better over time").
+storage.clear_override() is the paired safety valve — any auto-applied
+change can be reverted to its hardcoded default in one call. If
+TUNABLE_PARAMS is ever extended to include anything that could affect
+real-money trading, auto-apply must NOT extend to it automatically —
+that would be a wholly new decision, not a consequence of this code
+already existing.
 """
 from __future__ import annotations
 
@@ -168,5 +179,50 @@ def generate_suggestions() -> int:
         logged += 1
 
     storage.set_meta("last_advisor_run_ts", str(int(time.time())))
-    log.info(f"Advisor run complete — {logged} new suggestion(s) written for review.")
+    log.info(f"Advisor run complete — {logged} new suggestion(s) written.")
     return logged
+
+
+def auto_apply_pending_suggestions() -> int:
+    """
+    Applies every currently-pending suggestion immediately — no human
+    click required. Safe specifically BECAUSE TUNABLE_PARAMS (see
+    shadow.py) is structurally limited to paper-only shadow strategies
+    (swing, favorites_baseline, longshot), which never place a real
+    order regardless of the main bot's own live/paper status — there is
+    no pathway from this function to real money. generate_suggestions()
+    already validated each suggestion once (whitelist, hallucination
+    guard, numeric range) before it became "pending" — this re-checks
+    current_value against what's ACTUALLY configured right now, since
+    something else (a different auto-applied suggestion, a manual
+    override, a person using clear_override) could have changed it in
+    the meantime; a mismatch marks the suggestion "stale" and skips it
+    rather than trusting a possibly-outdated premise.
+
+    Deliberately its own function, called separately right after
+    generate_suggestions() at both call sites (bot.py's scheduled advisor
+    run, the dashboard's manual trigger) rather than folded into
+    generate_suggestions() itself — the write to storage.set_override()
+    stays a distinct, visible step, not a change buried inside the
+    suggestion-generation logic. If TUNABLE_PARAMS is ever extended to
+    include anything that could affect real-money trading, that is a
+    wholly new decision requiring its own reconsideration, never an
+    automatic consequence of this function already existing.
+
+    Returns the number of suggestions actually applied.
+    """
+    applied = 0
+    for s in storage.get_suggestions(status="pending"):
+        real_current = shadow.ACTIVE_STRATEGIES.get(s["strategy"], {}).get(s["param"])
+        if real_current is None or abs(s["current_value"] - float(real_current)) > 0.01:
+            log.warning(f"Skipping auto-apply for {s['strategy']}.{s['param']} — current_value "
+                        f"({s['current_value']}) no longer matches the real configured value "
+                        f"({real_current}), likely stale.")
+            storage.update_suggestion_status(s["id"], "stale")
+            continue
+        storage.set_override(s["strategy"], s["param"], s["suggested_value"])
+        storage.update_suggestion_status(s["id"], "auto_applied")
+        log.info(f"Auto-applied: {s['strategy']}.{s['param']} {s['current_value']} -> "
+                 f"{s['suggested_value']} ({s['rationale']})")
+        applied += 1
+    return applied
