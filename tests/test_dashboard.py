@@ -401,5 +401,25 @@ class TestAutoApplyDashboardUI(DashboardTestCase):
         self.assertIn("1 auto-applied", resp.get_data(as_text=True))
 
 
+class TestBotVersionDisplay(DashboardTestCase):
+    """CONFIRMED REAL MOTIVATION: a loss-analysis review flagged a
+    favorites_baseline failure that looked identical to an already-fixed
+    bug, with no way to tell from the trade data alone whether the fix
+    was live yet."""
+
+    def test_recent_trades_table_shows_bot_version(self):
+        storage.log_trade("T1", "yes", 10, 40, "paper", None, bot_version="abc1234")
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("abc1234", body)
+        self.assertIn("<th>Version</th>", body)
+
+    def test_open_position_detail_shows_bot_version(self):
+        storage.log_shadow_trade("swing", "T3", "yes", 10, 40, bot_version="def5678")
+        storage.snapshot_shadow_bankroll("swing", 50000)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("def5678", body)
+        self.assertIn("Bot version:", body)
+
+
 if __name__ == "__main__":
     unittest.main()
