@@ -413,7 +413,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                       no_bids: Optional[list[tuple[int, int]]] = None,
                       hours_until_close: Optional[float] = None,
                       yes_bid: Optional[int] = None,
-                      event_ticker: Optional[str] = None) -> None:
+                      event_ticker: Optional[str] = None,
+                      bot_version: Optional[str] = None) -> None:
     """Called once per scanned market per cycle. Every strategy independently
     decides whether IT would trade this market — never a real order.
 
@@ -449,7 +450,13 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
     underlying event" — see storage.has_open_position_for_event's
     docstring for the confirmed bug this prevents: buying multiple
     mutually-conflicting bucket positions on the same underlying outcome
-    isn't diversification, it's the same bet placed several times."""
+    isn't diversification, it's the same bet placed several times.
+
+    bot_version: the short git commit hash the bot was running when this
+    decision was made (see bot.get_git_commit) — stored on every trade so
+    a later review can tell exactly which code was live, rather than
+    having to separately ask whether a pull+restart happened at the
+    right time."""
     engines = get_engines()
 
     for name, cfg in ACTIVE_STRATEGIES.items():
@@ -715,7 +722,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                     storage.log_shadow_trade(name, ticker, "both", pairs, realized_price,
                                               model_probability=None, station_code=station_code, measure=measure,
                                               rationale=candidate.rationale, event_ticker=event_ticker,
-                                              hours_until_close_at_decision=hours_until_close)
+                                              hours_until_close_at_decision=hours_until_close,
+                                              bot_version=bot_version)
                     rm.record_fill(cost_cents=pairs * realized_price)
             continue
 
@@ -955,7 +963,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                                   hours_until_close_at_decision=hours_until_close,
                                   performance_dampening_multiplier=dampening,
                                   calibration_dampening_multiplier=cal_dampening,
-                                  concentration_dampening_multiplier=conc_dampening)
+                                  concentration_dampening_multiplier=conc_dampening,
+                                  bot_version=bot_version)
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
