@@ -964,7 +964,16 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                                   performance_dampening_multiplier=dampening,
                                   calibration_dampening_multiplier=cal_dampening,
                                   concentration_dampening_multiplier=conc_dampening,
-                                  bot_version=bot_version)
+                                  bot_version=bot_version,
+                                  observed_temp_f=(signal.observed_temp_f if signal else None),
+                                  forecast_temp_f=(signal.forecast_temp_f if signal else None),
+                                  precip_pop_pct=(signal.precip_pop_pct if signal else None),
+                                  observed_precip_mm=(signal.observed_precip_mm if signal else None),
+                                  threshold_low_f=(signal.threshold_low_f if signal else None),
+                                  threshold_high_f=(signal.threshold_high_f if signal else None),
+                                  fee_cents_paid=fees.taker_fee_cents(contracts, realized_price),
+                                  yes_bid_depth_total=(sum(sz for _, sz in yes_bids) if yes_bids else None),
+                                  no_bid_depth_total=(sum(sz for _, sz in no_bids) if no_bids else None))
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
