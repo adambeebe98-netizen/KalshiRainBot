@@ -135,6 +135,29 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
                                      -- motivation: a favorites_baseline loss that looked identical
                                      -- to an already-fixed bug, with no way to tell from the trade
                                      -- alone whether the fix was live yet.
+    observed_temp_f REAL,          -- the RAW ground-truth weather inputs the model actually
+    forecast_temp_f REAL,           -- consumed to produce its probability, captured directly
+    precip_pop_pct REAL,            -- instead of only surviving as a human-readable trace in
+    observed_precip_mm REAL,        -- rationale text. threshold_low_f/high_f is the actual
+    threshold_low_f REAL,           -- market threshold this specific trade was evaluated against
+    threshold_high_f REAL,          -- (e.g. "84F", "[85,95]") — each field stays NULL where it
+                                     -- genuinely doesn't apply to the market type (rain fields for
+                                     -- a temperature trade and vice versa) rather than a
+                                     -- placeholder value; NULL here means "not applicable," not
+                                     -- "data was lost." Explicitly requested: "data is the
+                                     -- absolute most important thing to log and store."
+    fee_cents_paid INTEGER,         -- the actual per-order fee (see fees.taker_fee_cents) —
+                                     -- already computed internally for every profitability check,
+                                     -- but never previously stored per-trade, so decomposing "how
+                                     -- much of my apparent edge did fees actually eat" required
+                                     -- recomputing it by hand.
+    yes_bid_depth_total INTEGER,    -- total resting order-book depth on each side at decision
+    no_bid_depth_total INTEGER,     -- time, when real book data was available that cycle — the
+                                     -- exact numbers behind depth_imbalance's decisions (and any
+                                     -- other strategy that had book data available), previously
+                                     -- only visible embedded in that one strategy's rationale text
+                                     -- ("yes_bid_depth=X no_bid_depth=Y"), not as its own queryable
+                                     -- column, and not captured at all for any other strategy.
     -- bracket_arbitrage only: the payout is mathematically fixed the moment
     -- the trade is placed (see shadow.py) — settlement just needs to know
     -- WHEN the event resolved, not WHICH bracket won, so this stores the
@@ -254,6 +277,22 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN concentration_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN bot_version TEXT",
         "ALTER TABLE trades ADD COLUMN bot_version TEXT",
+        "ALTER TABLE shadow_trades ADD COLUMN observed_temp_f REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN forecast_temp_f REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN precip_pop_pct REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN observed_precip_mm REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN threshold_low_f REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN threshold_high_f REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN fee_cents_paid INTEGER",
+        "ALTER TABLE shadow_trades ADD COLUMN yes_bid_depth_total INTEGER",
+        "ALTER TABLE shadow_trades ADD COLUMN no_bid_depth_total INTEGER",
+        "ALTER TABLE trades ADD COLUMN observed_temp_f REAL",
+        "ALTER TABLE trades ADD COLUMN forecast_temp_f REAL",
+        "ALTER TABLE trades ADD COLUMN precip_pop_pct REAL",
+        "ALTER TABLE trades ADD COLUMN observed_precip_mm REAL",
+        "ALTER TABLE trades ADD COLUMN threshold_low_f REAL",
+        "ALTER TABLE trades ADD COLUMN threshold_high_f REAL",
+        "ALTER TABLE trades ADD COLUMN fee_cents_paid INTEGER",
     ):
         try:
             conn.execute(stmt)
@@ -292,13 +331,24 @@ def log_decision(ticker: str, side: str, market_price_cents: int, model_probabil
 def log_trade(ticker: str, side: str, count: int, price_cents: int, mode: str,
               order_id: str | None, model_probability: float | None = None,
               station_code: str | None = None, measure: str | None = None,
-              bot_version: str | None = None) -> int:
+              bot_version: str | None = None,
+              observed_temp_f: float | None = None,
+              forecast_temp_f: float | None = None,
+              precip_pop_pct: float | None = None,
+              observed_precip_mm: float | None = None,
+              threshold_low_f: float | None = None,
+              threshold_high_f: float | None = None,
+              fee_cents_paid: int | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO trades (ts, ticker, side, count, price_cents, mode, order_id, "
-            "model_probability, station_code, measure, bot_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "model_probability, station_code, measure, bot_version, observed_temp_f, "
+            "forecast_temp_f, precip_pop_pct, observed_precip_mm, threshold_low_f, "
+            "threshold_high_f, fee_cents_paid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), ticker, side, count, price_cents, mode, order_id,
-             model_probability, station_code, measure, bot_version),
+             model_probability, station_code, measure, bot_version, observed_temp_f,
+             forecast_temp_f, precip_pop_pct, observed_precip_mm, threshold_low_f,
+             threshold_high_f, fee_cents_paid),
         )
         return cur.lastrowid
 
@@ -394,7 +444,16 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       performance_dampening_multiplier: float | None = None,
                       calibration_dampening_multiplier: float | None = None,
                       concentration_dampening_multiplier: float | None = None,
-                      bot_version: str | None = None) -> int:
+                      bot_version: str | None = None,
+                      observed_temp_f: float | None = None,
+                      forecast_temp_f: float | None = None,
+                      precip_pop_pct: float | None = None,
+                      observed_precip_mm: float | None = None,
+                      threshold_low_f: float | None = None,
+                      threshold_high_f: float | None = None,
+                      fee_cents_paid: int | None = None,
+                      yes_bid_depth_total: int | None = None,
+                      no_bid_depth_total: int | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO shadow_trades (ts, strategy, ticker, side, count, price_cents, "
@@ -402,14 +461,18 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
             "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker, "
             "market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
             "performance_dampening_multiplier, calibration_dampening_multiplier, "
-            "concentration_dampening_multiplier, bot_version) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "concentration_dampening_multiplier, bot_version, observed_temp_f, forecast_temp_f, "
+            "precip_pop_pct, observed_precip_mm, threshold_low_f, threshold_high_f, "
+            "fee_cents_paid, yes_bid_depth_total, no_bid_depth_total) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
              precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker,
              market_implied_probability, raw_model_probability, hours_until_close_at_decision,
              performance_dampening_multiplier, calibration_dampening_multiplier,
-             concentration_dampening_multiplier, bot_version),
+             concentration_dampening_multiplier, bot_version, observed_temp_f, forecast_temp_f,
+             precip_pop_pct, observed_precip_mm, threshold_low_f, threshold_high_f,
+             fee_cents_paid, yes_bid_depth_total, no_bid_depth_total),
         )
         return cur.lastrowid
 
