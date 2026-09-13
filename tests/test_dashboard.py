@@ -67,7 +67,7 @@ class TestDashboardEmptyState(DashboardTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Strategy performance", body)
         self.assertIn("No shadow strategy data yet", body)
-        self.assertIn("No pending suggestions", body)
+        self.assertIn("No suggestions yet", body)
         self.assertIn("No retrospective yet", body)
 
 
@@ -358,6 +358,47 @@ class TestWipeDataRoute(DashboardTestCase):
         with storage.get_conn() as conn:
             n = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
         self.assertEqual(n, 0)
+
+
+class TestAutoApplyDashboardUI(DashboardTestCase):
+    def test_shows_active_override_with_revert_button(self):
+        storage.set_override("swing", "exit_offset", 12)
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("Currently active overrides", body)
+        self.assertIn("swing.exit_offset", body)
+        self.assertIn("Revert to default", body)
+
+    def test_shows_recently_auto_applied_history(self):
+        storage.log_suggestion("longshot", "min_price", 2.0, 5.0, "test rationale for history")
+        with storage.get_conn() as conn:
+            sid = conn.execute("SELECT id FROM suggestions WHERE param='min_price'").fetchone()[0]
+        storage.update_suggestion_status(sid, "auto_applied")
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("Recently auto-applied", body)
+        self.assertIn("test rationale for history", body)
+
+    def test_revert_override_clears_it_and_restarts(self):
+        storage.set_override("swing", "exit_offset", 12)
+        with patch.object(webapp, "restart_bot", return_value="restarted"):
+            resp = _client().post("/revert_override", data={"strategy": "swing", "param": "exit_offset"},
+                                    follow_redirects=True)
+        overrides = storage.get_overrides()
+        self.assertNotIn("exit_offset", overrides.get("swing", {}))
+        self.assertIn("Reverted", resp.get_data(as_text=True))
+
+    def test_revert_override_with_missing_fields_does_nothing(self):
+        storage.set_override("swing", "exit_offset", 12)
+        resp = _client().post("/revert_override", data={}, follow_redirects=True)
+        overrides = storage.get_overrides()
+        self.assertEqual(overrides["swing"]["exit_offset"], 12)
+        self.assertIn("Missing strategy or param", resp.get_data(as_text=True))
+
+    def test_run_advisor_action_reports_auto_applied_count(self):
+        with patch.dict(sys.modules, {"advisor": MagicMock(
+                generate_suggestions=lambda: 0,
+                auto_apply_pending_suggestions=lambda: 1)}):
+            resp = _client().post("/control", data={"action": "run_advisor"}, follow_redirects=True)
+        self.assertIn("1 auto-applied", resp.get_data(as_text=True))
 
 
 if __name__ == "__main__":
