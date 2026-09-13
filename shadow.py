@@ -655,7 +655,8 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
 
                     storage.log_shadow_trade(name, ticker, "both", pairs, realized_price,
                                               model_probability=None, station_code=station_code, measure=measure,
-                                              rationale=candidate.rationale)
+                                              rationale=candidate.rationale, event_ticker=event_ticker,
+                                              hours_until_close_at_decision=hours_until_close)
                     rm.record_fill(cost_cents=pairs * realized_price)
             continue
 
@@ -784,6 +785,16 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                                      f"(cold streak: {perf['trades']} recent trades, "
                                      f"{perf['roi_pct']:.1f}% ROI)")
 
+        # Both default to "no dampening applied" (1.0) rather than staying
+        # undefined — they're only conditionally computed below (calibration
+        # dampening only for model-based kinds, concentration dampening only
+        # for non-arbitrage kinds with a real event_ticker), but every trade
+        # gets logged with a real number in these columns either way, not a
+        # NULL that would be ambiguous between "not applicable" and "not
+        # dampened."
+        cal_dampening = 1.0
+        conc_dampening = 1.0
+
         # Automatic calibration-aware dampening — same "reduce risk, never
         # increase it" philosophy as performance dampening above, just
         # triggered by calibration sample count instead of a losing
@@ -877,7 +888,15 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
         storage.log_shadow_trade(name, ticker, candidate.side, contracts, realized_price,
                                   model_probability=model_prob, station_code=station_code, measure=measure,
                                   exit_target_cents=exit_target, rationale=candidate.rationale,
-                                  confidence=confidence, event_ticker=event_ticker)
+                                  confidence=confidence, event_ticker=event_ticker,
+                                  market_implied_probability=(signal.market_implied_probability
+                                                               if signal else None),
+                                  raw_model_probability=(signal.raw_model_probability_yes
+                                                          if signal else None),
+                                  hours_until_close_at_decision=hours_until_close,
+                                  performance_dampening_multiplier=dampening,
+                                  calibration_dampening_multiplier=cal_dampening,
+                                  concentration_dampening_multiplier=conc_dampening)
         rm.record_fill(cost_cents=contracts * realized_price)
 
 
