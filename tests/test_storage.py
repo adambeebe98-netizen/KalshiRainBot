@@ -294,6 +294,53 @@ class TestClearOverride(unittest.TestCase):
         self.assertEqual(overrides["swing"]["entry_max"], 35)
 
 
+class TestNewWeatherAndFeeColumns(unittest.TestCase):
+    """Explicitly requested: 'data is the absolute most important thing to
+    log and store.' Covers the storage layer for observed_temp_f,
+    forecast_temp_f, precip_pop_pct, observed_precip_mm, threshold_low_f/
+    high_f, fee_cents_paid, and yes/no_bid_depth_total."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+        _clear("trades")
+
+    def test_shadow_trade_stores_all_new_fields(self):
+        tid = storage.log_shadow_trade(
+            "swing", "T1", "yes", 10, 40,
+            observed_temp_f=88.0, forecast_temp_f=90.0, precip_pop_pct=None,
+            observed_precip_mm=None, threshold_low_f=85.0, threshold_high_f=95.0,
+            fee_cents_paid=13, yes_bid_depth_total=500, no_bid_depth_total=120,
+        )
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT observed_temp_f, forecast_temp_f, precip_pop_pct, observed_precip_mm, "
+                "threshold_low_f, threshold_high_f, fee_cents_paid, yes_bid_depth_total, "
+                "no_bid_depth_total FROM shadow_trades WHERE id=?", (tid,)
+            ).fetchone()
+        self.assertEqual(row, (88.0, 90.0, None, None, 85.0, 95.0, 13, 500, 120))
+
+    def test_main_trades_table_stores_weather_and_fee_fields(self):
+        tid = storage.log_trade("T2", "yes", 10, 40, "paper", None,
+                                  observed_temp_f=88.0, forecast_temp_f=90.0,
+                                  threshold_low_f=85.0, threshold_high_f=95.0, fee_cents_paid=13)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT observed_temp_f, forecast_temp_f, threshold_low_f, threshold_high_f, "
+                "fee_cents_paid FROM trades WHERE id=?", (tid,)
+            ).fetchone()
+        self.assertEqual(row, (88.0, 90.0, 85.0, 95.0, 13))
+
+    def test_omitting_new_fields_leaves_them_null(self):
+        tid = storage.log_shadow_trade("swing", "T3", "yes", 10, 40)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT observed_temp_f, fee_cents_paid, yes_bid_depth_total "
+                "FROM shadow_trades WHERE id=?", (tid,)
+            ).fetchone()
+        self.assertEqual(row, (None, None, None))
+
+
 class TestBotVersionColumn(unittest.TestCase):
     """CONFIRMED REAL MOTIVATION: a loss-analysis review flagged a
     favorites_baseline failure that looked identical to an already-fixed
