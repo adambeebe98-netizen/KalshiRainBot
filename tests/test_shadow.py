@@ -840,6 +840,104 @@ class TestFullDataCaptureForAnalysis(unittest.TestCase):
         self.assertEqual(row[0], 0.5)
 
 
+class TestFadeLongshotNearClose(unittest.TestCase):
+    """Suggested by an external LLM (Gemini) brainstorm, adapted to this
+    codebase's actual data and existing signal infrastructure. Genuinely
+    distinct from longshot (buys cheap hoping for the payout) and
+    settlement_window (trades whatever side/price the model favors near
+    close): this specifically fades a cheap "lottery ticket" contract,
+    buying the expensive opposing side, only when close to settlement AND
+    the model is highly confident the cheap side won't hit.
+
+    Found and fixed a real bug in this codebase while building it: an
+    earlier edit had accidentally deleted the `elif kind ==
+    "depth_imbalance":` line itself, merging that branch's body into this
+    one unconditionally — candidate and model_prob were being silently
+    overwritten by depth_imbalance_candidate's result immediately after
+    being set correctly. Caught via direct tracing, never pushed."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def _signal(self, ticker, side="no", model_prob=0.97, edge=30):
+        return TradeSignal(ticker=ticker, side=side, model_probability=model_prob,
+                            model_probability_yes=1 - model_prob if side == "no" else model_prob,
+                            market_implied_probability=0.90, edge_cents=edge, rationale="test signal")
+
+    def test_is_registered(self):
+        self.assertIn("fade_longshot_near_close", shadow.ACTIVE_STRATEGIES)
+
+    def test_fires_on_a_cheap_longshot_near_close_with_high_confidence(self):
+        shadow.evaluate_and_log("T1", self._signal("T1"), yes_ask=None, no_ask=93,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side, price_cents, rationale FROM shadow_trades "
+                "WHERE strategy='fade_longshot_near_close' AND ticker='T1'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "no")
+        self.assertEqual(row[1], 93)
+        self.assertIn("fading a ~7c longshot", row[2])
+
+    def test_does_not_fire_far_from_close(self):
+        shadow.evaluate_and_log("T2", self._signal("T2"), yes_ask=None, no_ask=93,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=10.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='fade_longshot_near_close' AND ticker='T2'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_when_opposing_price_is_outside_the_fade_band(self):
+        shadow.evaluate_and_log("T3", self._signal("T3"), yes_ask=None, no_ask=70,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='fade_longshot_near_close' AND ticker='T3'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_does_not_fire_when_model_is_not_confident_enough(self):
+        shadow.evaluate_and_log("T4", self._signal("T4", model_prob=0.85), yes_ask=None, no_ask=93,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_trades WHERE strategy='fade_longshot_near_close' AND ticker='T4'"
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_works_symmetrically_when_the_confident_side_is_yes(self):
+        shadow.evaluate_and_log("T5", self._signal("T5", side="yes", model_prob=0.97),
+                                 yes_ask=94, no_ask=None,
+                                 station_code="KAUS", measure="precipitation_daily", hours_until_close=1.0)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side, price_cents FROM shadow_trades WHERE strategy='fade_longshot_near_close' AND ticker='T5'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "yes")
+        self.assertEqual(row[1], 94)
+
+    def test_depth_imbalance_is_unaffected_confirming_no_branch_merge_regression(self):
+        """Direct regression test for the accidental branch-merge bug
+        found while building this strategy — confirms depth_imbalance's
+        own logic is fully intact and independent."""
+        shadow.evaluate_and_log("T6", None, yes_ask=45, no_ask=60,
+                                 station_code="KAUS", measure="precipitation_daily",
+                                 yes_bids=[(40, 100)], no_bids=[(50, 20)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT side FROM shadow_trades WHERE strategy='depth_imbalance' AND ticker='T6'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "yes")
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
