@@ -27,6 +27,25 @@ def make_signal(ticker, side="yes", edge=30, prob=0.7):
                         edge_cents=edge, rationale="test")
 
 
+def _enable_always_trade_for_testing():
+    """rain_always_trade was retired from production config (see
+    shadow.py — three independent loss-analysis reviews flagged it as
+    pure noise with zero informational value, explicitly requested:
+    "rain always trade let's kill it"). But the underlying always_trade
+    KIND is still real, live dispatch logic in shadow.py, covering two
+    confirmed bug fixes (missing no-side fallback pricing, an
+    incompatible fixed max_slippage_cents) — retiring the strategy
+    shouldn't silently drop regression coverage for bugs already found
+    and fixed in this exact code path. Tests that genuinely exercise the
+    KIND's logic inject this config directly rather than depending on
+    production having it enabled."""
+    shadow.ACTIVE_STRATEGIES["rain_always_trade"] = {
+        "kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
+        "min_edge_cents_override": 0, "max_price_override": 99,
+        "max_daily_loss_pct_override": 1.0,
+    }
+
+
 class TestCategoryFilter(unittest.TestCase):
     def setUp(self):
         storage.init_db()
@@ -78,6 +97,7 @@ class TestAlwaysTradeFallbackPricing(unittest.TestCase):
             clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
         shadow._engines = None
         shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        _enable_always_trade_for_testing()
 
     def test_falls_back_to_no_side_when_only_that_price_is_real(self):
         """THE regression: this used to only check yes_ask and silently
@@ -172,6 +192,7 @@ class TestRationaleCapture(unittest.TestCase):
             clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
         shadow._engines = None
         shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        _enable_always_trade_for_testing()
 
     def test_calibrated_strategy_captures_the_real_signal_rationale(self):
         """Without this, a post-mortem analysis of a losing trade only has
@@ -1096,6 +1117,7 @@ class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
             clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions")
         shadow._engines = None
         shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+        _enable_always_trade_for_testing()
 
     def test_favorites_baseline_can_now_actually_trade(self):
         shadow.evaluate_and_log("T1", None, yes_ask=92, no_ask=None,
