@@ -415,6 +415,40 @@ class TestNewAnalysisColumnsSchema(unittest.TestCase):
         self.assertEqual(row, (None, None))
 
 
+class TestCountOpenPositionsForStrategyAndEvent(unittest.TestCase):
+    """Foundation for shadow.py's self-concentration dampening — the
+    complement to count_distinct_strategies_exposed_to_event, which
+    deliberately excludes a strategy's own prior positions. This counts
+    the opposite risk: a single strategy repeatedly betting on the same
+    underlying outcome through different thresholds within one event."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("shadow_trades")
+
+    def test_reproduces_the_exact_las_vegas_scenario(self):
+        storage.log_shadow_trade("temp_forecast_momentum", "T1", "no", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("temp_forecast_momentum", "EVENT1"), 1)
+        storage.log_shadow_trade("temp_forecast_momentum", "T2", "no", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("temp_forecast_momentum", "EVENT1"), 2)
+        storage.log_shadow_trade("temp_forecast_momentum", "T3", "no", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("temp_forecast_momentum", "EVENT1"), 3)
+
+    def test_a_different_strategy_on_the_same_event_is_not_counted(self):
+        storage.log_shadow_trade("temp_forecast_momentum", "T1", "no", 10, 40, event_ticker="EVENT1")
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("calibrated_balanced", "EVENT1"), 0)
+
+    def test_a_settled_position_no_longer_counts(self):
+        tid = storage.log_shadow_trade("temp_forecast_momentum", "T1", "no", 10, 40, event_ticker="EVENT1")
+        storage.log_shadow_trade("temp_forecast_momentum", "T2", "no", 10, 40, event_ticker="EVENT1")
+        storage.settle_shadow_trade(tid, won=False, pnl_cents=-400)
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("temp_forecast_momentum", "EVENT1"), 1)
+
+    def test_missing_event_ticker_returns_zero_without_crashing(self):
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("swing", None), 0)
+        self.assertEqual(storage.count_open_positions_for_strategy_and_event("swing", ""), 0)
+
+
 class TestCountDistinctStrategiesExposedToEvent(unittest.TestCase):
     """Foundation for shadow.py's concentration dampening — see its
     docstring for the confirmed real-world motivation (20+ trades across
