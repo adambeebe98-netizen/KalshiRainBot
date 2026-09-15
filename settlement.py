@@ -105,3 +105,40 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
         log.info(f"Settled {shadow_settled} shadow-strategy trade(s) this cycle.")
 
     return settled_count
+
+
+def backfill_market_outcomes(kalshi: KalshiClient, limit: int = 50) -> int:
+    """
+    Records the real settlement result for every scanned market whose
+    close time has passed, regardless of whether any strategy ever
+    traded it — foundation for retrospective backtesting, explicitly
+    requested: collect data across every market, then later analyze it
+    to find where a profitable trade existed that current strategies
+    missed. That question can only be answered once the actual outcome
+    is known for markets nobody acted on, which is exactly what this
+    fills in.
+
+    Deliberately NOT called every cycle like settle_resolved_trades above
+    — over weeks of scanning, the number of distinct tickers ever
+    snapshotted could be large, and checking settlement for all of them
+    every single cycle would mean a large, mostly-redundant burst of API
+    calls (a market that hasn't settled yet won't suddenly settle between
+    one cycle and the next a few minutes later). Called on its own,
+    longer interval instead (see bot.py), with `limit` bounding how many
+    get checked per run so a real backlog doesn't turn into one huge
+    burst either.
+    """
+    pending = storage.get_tickers_needing_outcome_backfill(limit=limit)
+    recorded = 0
+    for row in pending:
+        ticker = row["ticker"]
+        try:
+            is_settled, result = kalshi.get_market_settlement(ticker)
+        except Exception as e:
+            log.warning(f"Could not check settlement for backfill on {ticker}: {e}")
+            continue
+        if not is_settled or result not in ("yes", "no"):
+            continue
+        storage.record_market_outcome(ticker, result)
+        recorded += 1
+    return recorded
