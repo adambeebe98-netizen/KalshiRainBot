@@ -130,6 +130,44 @@ def concentration_dampening_multiplier(other_strategies_count: int) -> float:
         return CONCENTRATION_DAMPENING_MODERATE_MULTIPLIER
     return 1.0
 
+
+# Self-concentration dampening — a single strategy repeatedly betting on
+# the same underlying outcome through different thresholds/brackets
+# within one event. Stricter thresholds than cross-strategy concentration
+# above (dampens starting at just 1 prior position, not 1-2) since these
+# aren't even independent judgments the way different strategies' bets
+# are — it's the SAME model, SAME station, SAME systematic bias, applied
+# to another slice of the identical outcome.
+SELF_CONCENTRATION_DAMPENING_MODERATE_THRESHOLD = 1   # 1 prior position on this event already
+SELF_CONCENTRATION_DAMPENING_SEVERE_THRESHOLD = 2     # 2+ prior positions already
+SELF_CONCENTRATION_DAMPENING_MODERATE_MULTIPLIER = 0.5
+SELF_CONCENTRATION_DAMPENING_SEVERE_MULTIPLIER = 0.25
+
+
+def self_concentration_dampening_multiplier(own_positions_count: int) -> float:
+    """
+    Pure function, same testable-in-isolation reasoning as the other
+    dampening functions — provably can only ever return <= 1.0.
+
+    CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found
+    temp_forecast_momentum taking three separate positions on different
+    thresholds within one event (KXLOWTLV-26SEP13), all on zero
+    calibration samples, all lost together. concentration_dampening
+    above deliberately excludes a strategy's own prior positions from its
+    count (see count_distinct_strategies_exposed_to_event's docstring —
+    it's measuring cross-strategy piling, not this), so this exact
+    pattern had no dampening layer covering it. A different threshold
+    market within the same event is still a bet on the same underlying
+    weather outcome, correlated through the same station, same model,
+    same systematic bias if there is one — not a genuinely independent
+    position just because the bracket number differs.
+    """
+    if own_positions_count >= SELF_CONCENTRATION_DAMPENING_SEVERE_THRESHOLD:
+        return SELF_CONCENTRATION_DAMPENING_SEVERE_MULTIPLIER
+    if own_positions_count >= SELF_CONCENTRATION_DAMPENING_MODERATE_THRESHOLD:
+        return SELF_CONCENTRATION_DAMPENING_MODERATE_MULTIPLIER
+    return 1.0
+
 # Bracket-arbitrage tuning — deliberately NOT in TUNABLE_PARAMS/advisor-editable,
 # same reasoning as the calibrated model itself: this is math (capital
 # efficiency + early-exit salvage), not a heuristic threshold to sweep.
@@ -902,6 +940,20 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                 candidate.rationale += (f"; sized down {int((1-conc_dampening)*100)}% "
                                          f"({other_count} other strategies already exposed to this event)")
 
+        # Self-concentration dampening — see
+        # self_concentration_dampening_multiplier's docstring above for
+        # the confirmed real-world motivation. Same arbitrage exemption as
+        # cross-strategy concentration (hedged by construction, no
+        # directional correlation risk).
+        self_dampening = 1.0
+        if kind != "arbitrage" and event_ticker:
+            own_count = storage.count_open_positions_for_strategy_and_event(name, event_ticker)
+            self_dampening = self_concentration_dampening_multiplier(own_count)
+            if self_dampening < 1.0:
+                contracts = max(1, int(contracts * self_dampening))
+                candidate.rationale += (f"; sized down {int((1-self_dampening)*100)}% "
+                                         f"({own_count} of my own positions already open on this event)")
+
         # Real depth-aware sizing/pricing when the caller fetched the order
         # book this cycle (see the docstring above and depth_sizing.py) —
         # `contracts` above becomes the CEILING this can size up to, not
@@ -964,6 +1016,7 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                                   performance_dampening_multiplier=dampening,
                                   calibration_dampening_multiplier=cal_dampening,
                                   concentration_dampening_multiplier=conc_dampening,
+                                  self_concentration_dampening_multiplier=self_dampening,
                                   bot_version=bot_version,
                                   observed_temp_f=(signal.observed_temp_f if signal else None),
                                   forecast_temp_f=(signal.forecast_temp_f if signal else None),
