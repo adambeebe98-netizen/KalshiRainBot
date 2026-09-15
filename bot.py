@@ -420,6 +420,30 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
                 log.warning(f"Orderbook fetch failed for {ticker}, shadow/sizing falls back to flat pricing: {e}")
                 yes_bids, no_bids = None, None
 
+            # Foundation for retrospective backtesting, explicitly
+            # requested: collect data across every scanned market —
+            # regardless of whether any strategy trades it — then later
+            # analyze it to find where a profitable trade existed that
+            # current strategies missed. Captures the same weather/price
+            # data every strategy already sees this cycle, just for EVERY
+            # market instead of only ones that end up trading. Wrapped
+            # defensively — a storage hiccup here must never block the
+            # real trading decisions right below it.
+            try:
+                storage.log_market_snapshot(
+                    ticker, event_ticker=market.get("event_ticker"),
+                    station_code=rules.station_code, measure=rules.measure,
+                    yes_ask=m_yes_ask, yes_bid=m_yes_bid, no_ask=no_ask, no_bid=m_no_bid,
+                    observed_temp_f=signal.observed_temp_f, forecast_temp_f=signal.forecast_temp_f,
+                    precip_pop_pct=signal.precip_pop_pct, observed_precip_mm=signal.observed_precip_mm,
+                    threshold_low_f=signal.threshold_low_f, threshold_high_f=signal.threshold_high_f,
+                    hours_until_close=hours_until_close(market.get("close_time")),
+                    model_probability_yes=signal.model_probability_yes,
+                    close_time=market.get("close_time"),
+                )
+            except Exception as e:
+                log.warning(f"Market snapshot logging failed for {ticker} (non-fatal): {e}")
+
             # Every shadow strategy (see shadow.py / strategies_lib.py) gets a
             # look at this same market, independent of what the ACTIVE bot
             # decides below — always paper, never a real order.
@@ -627,6 +651,12 @@ def main():
 
     advisor_interval = getattr(SETTINGS, "advisor_interval_seconds", 7 * 24 * 3600)
     retrospective_interval = getattr(SETTINGS, "retrospective_interval_seconds", 24 * 3600)
+    # Hourly by default — see backfill_market_outcomes' docstring for why
+    # this runs far less often than settle_resolved_trades: a market that
+    # hasn't settled yet won't suddenly settle a few minutes later, so
+    # checking every cycle would mostly just be a redundant burst of API
+    # calls against a large, growing set of scanned-but-unresolved tickers.
+    outcome_backfill_interval = getattr(SETTINGS, "outcome_backfill_interval_seconds", 3600)
     series_cache: dict = {}
     consecutive_failures = 0
     while True:
@@ -641,6 +671,22 @@ def main():
             current_series = get_series_tickers(kalshi, series_cache)
             scan_and_trade(kalshi, extractor, risk, live, current_series)
             storage.snapshot_bankroll(risk.state.bankroll_cents, note="cycle complete")
+
+            # Foundation for retrospective backtesting, explicitly
+            # requested: fills in the real outcome for every scanned
+            # market (not just traded ones) so a later analysis can find
+            # where a profitable trade existed that current strategies
+            # missed — that question can only be answered once the actual
+            # result is known for markets nobody acted on.
+            last_backfill = float(storage.get_meta("last_outcome_backfill_ts", "0"))
+            if time.time() - last_backfill > outcome_backfill_interval:
+                try:
+                    backfilled = settlement.backfill_market_outcomes(kalshi)
+                    if backfilled:
+                        log.info(f"Backfilled {backfilled} market outcome(s) for retrospective analysis.")
+                    storage.set_meta("last_outcome_backfill_ts", str(int(time.time())))
+                except Exception as e:
+                    log.warning(f"Outcome backfill failed (non-fatal): {e}")
 
             # Weekly (by default) Claude-based review, followed immediately
             # by auto-applying whatever it suggested — see advisor.py's
