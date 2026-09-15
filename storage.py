@@ -123,10 +123,10 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
     performance_dampening_multiplier REAL,   -- the actual multiplier applied by each dampening
     calibration_dampening_multiplier REAL,    -- layer at decision time (1.0 = no dampening).
     concentration_dampening_multiplier REAL,  -- Structured columns, not just the rationale text
-                                                -- notes these already produce — makes "does ROI
-                                                -- differ when calibration dampening kicked in"
-                                                -- a plain GROUP BY instead of a fragile LIKE
-                                                -- query against free text.
+    self_concentration_dampening_multiplier REAL,  -- notes these already produce — makes "does
+                                                     -- ROI differ when calibration dampening
+                                                     -- kicked in" a plain GROUP BY instead of a
+                                                     -- fragile LIKE query against free text.
     bot_version TEXT,              -- the short git commit hash the bot was running at decision
                                      -- time (see bot.get_git_commit) — lets a later review answer
                                      -- "was fix X actually live when this trade happened" from the
@@ -275,6 +275,7 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE shadow_trades ADD COLUMN performance_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN calibration_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN concentration_dampening_multiplier REAL",
+        "ALTER TABLE shadow_trades ADD COLUMN self_concentration_dampening_multiplier REAL",
         "ALTER TABLE shadow_trades ADD COLUMN bot_version TEXT",
         "ALTER TABLE trades ADD COLUMN bot_version TEXT",
         "ALTER TABLE shadow_trades ADD COLUMN observed_temp_f REAL",
@@ -444,6 +445,7 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
                       performance_dampening_multiplier: float | None = None,
                       calibration_dampening_multiplier: float | None = None,
                       concentration_dampening_multiplier: float | None = None,
+                      self_concentration_dampening_multiplier: float | None = None,
                       bot_version: str | None = None,
                       observed_temp_f: float | None = None,
                       forecast_temp_f: float | None = None,
@@ -461,16 +463,18 @@ def log_shadow_trade(strategy: str, ticker: str, side: str, count: int, price_ce
             "precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker, "
             "market_implied_probability, raw_model_probability, hours_until_close_at_decision, "
             "performance_dampening_multiplier, calibration_dampening_multiplier, "
-            "concentration_dampening_multiplier, bot_version, observed_temp_f, forecast_temp_f, "
+            "concentration_dampening_multiplier, self_concentration_dampening_multiplier, "
+            "bot_version, observed_temp_f, forecast_temp_f, "
             "precip_pop_pct, observed_precip_mm, threshold_low_f, threshold_high_f, "
             "fee_cents_paid, yes_bid_depth_total, no_bid_depth_total) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), strategy, ticker, side, count, price_cents,
              model_probability, station_code, measure, exit_target_cents,
              precomputed_payout_cents, sample_member_ticker, rationale, confidence, event_ticker,
              market_implied_probability, raw_model_probability, hours_until_close_at_decision,
              performance_dampening_multiplier, calibration_dampening_multiplier,
-             concentration_dampening_multiplier, bot_version, observed_temp_f, forecast_temp_f,
+             concentration_dampening_multiplier, self_concentration_dampening_multiplier,
+             bot_version, observed_temp_f, forecast_temp_f,
              precip_pop_pct, observed_precip_mm, threshold_low_f, threshold_high_f,
              fee_cents_paid, yes_bid_depth_total, no_bid_depth_total),
         )
@@ -695,6 +699,33 @@ def count_distinct_strategies_exposed_to_event(event_ticker: str | None,
             query += " AND strategy != ?"
             params.append(exclude_strategy)
         return conn.execute(query, params).fetchone()[0]
+
+
+def count_open_positions_for_strategy_and_event(strategy: str, event_ticker: str | None) -> int:
+    """
+    How many open positions does THIS SAME strategy already hold
+    somewhere in this event — the complement to
+    count_distinct_strategies_exposed_to_event, which deliberately
+    excludes a strategy's own prior positions since it's counting
+    cross-strategy concentration. This counts the opposite risk: a
+    single strategy repeatedly betting on the same underlying outcome
+    through different thresholds/brackets within one event.
+
+    CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found
+    temp_forecast_momentum taking three separate positions on different
+    thresholds within one event (KXLOWTLV), on zero calibration samples,
+    all lost together — concentration_dampening's own count excludes a
+    strategy's prior positions on the same event by design, so this
+    specific pattern (one strategy, multiple thresholds, same underlying
+    outcome) had no dampening layer covering it at all.
+    """
+    if not event_ticker:
+        return 0
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM shadow_trades WHERE strategy=? AND event_ticker=? AND status='open'",
+            (strategy, event_ticker),
+        ).fetchone()[0]
 
 
 def get_recent_strategy_performance(strategy: str, lookback: int = 20) -> dict:
