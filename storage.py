@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 from config import SETTINGS
@@ -202,6 +203,57 @@ CREATE TABLE IF NOT EXISTS forecast_history (
     forecast_temp_f REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_forecast_history_ticker_ts ON forecast_history(ticker, ts);
+
+-- Foundation for retrospective backtesting/pattern-mining, explicitly
+-- requested: collect data across every scanned market — regardless of
+-- whether any strategy chose to trade it — then later analyze it to find
+-- where a profitable trade existed that current strategies missed. This
+-- is fundamentally different from shadow_trades: that table only has a
+-- row when SOME strategy decided to act; this one has a row every cycle
+-- for EVERY market scanned, win or lose, traded or not, which is what
+-- "did we miss an opportunity" actually requires being able to ask.
+-- One row per (ticker, cycle) — NOT deduplicated or aggregated, so the
+-- full price/weather trajectory over a market's life is reconstructable,
+-- not just its final state.
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    event_ticker TEXT,
+    station_code TEXT,
+    measure TEXT,
+    yes_ask INTEGER,
+    yes_bid INTEGER,
+    no_ask INTEGER,
+    no_bid INTEGER,
+    observed_temp_f REAL,
+    forecast_temp_f REAL,
+    precip_pop_pct REAL,
+    observed_precip_mm REAL,
+    threshold_low_f REAL,
+    threshold_high_f REAL,
+    hours_until_close REAL,
+    model_probability_yes REAL,  -- what the CURRENT calibrated model says — captured so a later
+                                   -- backtest can distinguish "the model already saw this and
+                                   -- correctly abstained" from "no strategy was even looking here"
+    close_time TEXT              -- Kalshi's own ISO close timestamp, needed by the outcome
+                                   -- backfill below to know when a market is even eligible to
+                                   -- have settled yet, without re-fetching market metadata
+);
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_ticker_ts ON market_snapshots(ticker, ts);
+
+-- The actual settlement result for every ticker ever snapshotted above,
+-- once known — deliberately separate from market_snapshots (many
+-- snapshot rows per ticker over its life, but settlement happens exactly
+-- once), and deliberately separate from shadow_trades/trades (this
+-- covers markets NO strategy ever touched, which is the entire point).
+-- Backfilled by settlement.backfill_market_outcomes — see its docstring
+-- for why this runs on its own schedule rather than every cycle.
+CREATE TABLE IF NOT EXISTS market_outcomes (
+    ticker TEXT PRIMARY KEY,
+    result TEXT NOT NULL,        -- 'yes' or 'no'
+    settled_ts INTEGER NOT NULL
+);
 
 -- Human-approved overrides to the heuristic strategies' guessed thresholds
 -- (swing/favorites/longshot — never the calibrated model or arbitrage).
@@ -1283,6 +1335,71 @@ def log_forecast_snapshot(ticker: str, forecast_temp_f: float | None) -> None:
         conn.execute(
             "INSERT INTO forecast_history (ts, ticker, forecast_temp_f) VALUES (?,?,?)",
             (int(time.time()), ticker, forecast_temp_f),
+        )
+
+
+def log_market_snapshot(ticker: str, event_ticker: str | None = None,
+                          station_code: str | None = None, measure: str | None = None,
+                          yes_ask: int | None = None, yes_bid: int | None = None,
+                          no_ask: int | None = None, no_bid: int | None = None,
+                          observed_temp_f: float | None = None,
+                          forecast_temp_f: float | None = None,
+                          precip_pop_pct: float | None = None,
+                          observed_precip_mm: float | None = None,
+                          threshold_low_f: float | None = None,
+                          threshold_high_f: float | None = None,
+                          hours_until_close: float | None = None,
+                          model_probability_yes: float | None = None,
+                          close_time: str | None = None) -> None:
+    """
+    Foundation for retrospective backtesting — see market_snapshots'
+    schema comment for the full reasoning. Called once per scanned
+    market per cycle, regardless of whether any strategy trades it.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO market_snapshots (ts, ticker, event_ticker, station_code, measure, "
+            "yes_ask, yes_bid, no_ask, no_bid, observed_temp_f, forecast_temp_f, precip_pop_pct, "
+            "observed_precip_mm, threshold_low_f, threshold_high_f, hours_until_close, "
+            "model_probability_yes, close_time) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), ticker, event_ticker, station_code, measure,
+             yes_ask, yes_bid, no_ask, no_bid, observed_temp_f, forecast_temp_f, precip_pop_pct,
+             observed_precip_mm, threshold_low_f, threshold_high_f, hours_until_close,
+             model_probability_yes, close_time),
+        )
+
+
+def get_tickers_needing_outcome_backfill(limit: int = 50) -> list[dict]:
+    """
+    Every ticker that's been snapshotted (so we have something to
+    backtest) but has no recorded outcome yet, and whose close_time has
+    genuinely passed — no point checking settlement on a market that
+    hasn't even closed. Returns the MOST RECENT snapshot's close_time
+    per ticker (a market's close_time doesn't change between snapshots,
+    but taking the latest is more robust to a rules/data hiccup on an
+    earlier cycle). limit bounds how many get checked per backfill run,
+    since a real backlog could otherwise mean a huge burst of settlement
+    API calls in one pass — see settlement.backfill_market_outcomes.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT ticker, MAX(ts) as latest_ts, close_time FROM market_snapshots "
+            "WHERE ticker NOT IN (SELECT ticker FROM market_outcomes) "
+            "AND close_time IS NOT NULL AND close_time < ? "
+            "GROUP BY ticker LIMIT ?",
+            (now_iso, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def record_market_outcome(ticker: str, result: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO market_outcomes (ticker, result, settled_ts) VALUES (?,?,?) "
+            "ON CONFLICT(ticker) DO NOTHING",
+            (ticker, result, int(time.time())),
         )
 
 
