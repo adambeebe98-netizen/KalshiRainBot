@@ -264,6 +264,72 @@ class TestCategoryBreakdownForCrossCategoryStrategies(unittest.TestCase):
         self.assertEqual(temp_row["settled"], 1)
 
 
+class TestMarketSnapshotsAndOutcomes(unittest.TestCase):
+    """Foundation for retrospective backtesting, explicitly requested:
+    collect data across every scanned market -- regardless of whether
+    any strategy trades it -- then later analyze it to find where a
+    profitable trade existed that current strategies missed."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("market_snapshots")
+        _clear("market_outcomes")
+
+    def test_log_market_snapshot_stores_everything(self):
+        storage.log_market_snapshot(
+            "T1", event_ticker="EVENT1", station_code="KAUS", measure="temperature_high",
+            yes_ask=40, yes_bid=38, no_ask=62, no_bid=60,
+            observed_temp_f=88.0, forecast_temp_f=90.0, threshold_low_f=85.0, threshold_high_f=95.0,
+            hours_until_close=2.0, model_probability_yes=0.7, close_time="2020-01-01T00:00:00Z",
+        )
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT event_ticker, station_code, observed_temp_f, close_time "
+                "FROM market_snapshots WHERE ticker='T1'"
+            ).fetchone()
+        self.assertEqual(row, ("EVENT1", "KAUS", 88.0, "2020-01-01T00:00:00Z"))
+
+    def test_omitting_fields_leaves_them_null(self):
+        storage.log_market_snapshot("T2")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT event_ticker, observed_temp_f FROM market_snapshots WHERE ticker='T2'").fetchone()
+        self.assertEqual(row, (None, None))
+
+    def test_past_close_time_with_no_outcome_is_eligible_for_backfill(self):
+        storage.log_market_snapshot("T1", close_time="2020-01-01T00:00:00Z")
+        pending = storage.get_tickers_needing_outcome_backfill()
+        self.assertEqual([r["ticker"] for r in pending], ["T1"])
+
+    def test_future_close_time_is_not_eligible_yet(self):
+        storage.log_market_snapshot("T2", close_time="2099-01-01T00:00:00Z")
+        pending = storage.get_tickers_needing_outcome_backfill()
+        self.assertNotIn("T2", [r["ticker"] for r in pending])
+
+    def test_missing_close_time_is_never_eligible(self):
+        storage.log_market_snapshot("T3")
+        pending = storage.get_tickers_needing_outcome_backfill()
+        self.assertNotIn("T3", [r["ticker"] for r in pending])
+
+    def test_recording_an_outcome_removes_it_from_backfill_list(self):
+        storage.log_market_snapshot("T1", close_time="2020-01-01T00:00:00Z")
+        storage.record_market_outcome("T1", "yes")
+        pending = storage.get_tickers_needing_outcome_backfill()
+        self.assertNotIn("T1", [r["ticker"] for r in pending])
+
+    def test_recording_twice_does_not_overwrite_the_first_result(self):
+        storage.record_market_outcome("T1", "yes")
+        storage.record_market_outcome("T1", "no")
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT result FROM market_outcomes WHERE ticker='T1'").fetchone()
+        self.assertEqual(row[0], "yes")
+
+    def test_limit_is_respected(self):
+        for i in range(10):
+            storage.log_market_snapshot(f"MANY-{i}", close_time="2020-01-01T00:00:00Z")
+        pending = storage.get_tickers_needing_outcome_backfill(limit=3)
+        self.assertEqual(len(pending), 3)
+
+
 class TestClearOverride(unittest.TestCase):
     """The safety valve paired with advisor.auto_apply_pending_suggestions
     (see that function's docstring) — nothing requires a human to approve
