@@ -207,18 +207,22 @@ STRATEGIES = {
     "rain_calibrated_conservative": {"kind": "calibrated", "risk": "conservative", "category_filter": "Rain"},
     "rain_calibrated_balanced":     {"kind": "calibrated", "risk": "balanced",     "category_filter": "Rain"},
     "rain_calibrated_aggressive":   {"kind": "calibrated", "risk": "aggressive",   "category_filter": "Rain"},
-    # PIPELINE SMOKE TEST — not a real strategy, doesn't try to be
-    # profitable, doesn't even use the model's edge estimate. The point is
-    # only to prove evaluate -> approve -> size -> log actually executes
-    # end to end on real rain markets every cycle, since that's been the
-    # open question tonight. min_edge_cents_override=0 and
-    # max_price_override=99 mean it accepts basically any priced market;
-    # max_daily_loss_pct_override=1.0 means a losing streak (expected and
-    # fine — it's paper money and isn't trying to win) never trips the
-    # kill switch and stops it from doing its one job of just trading.
-    "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
-                            "min_edge_cents_override": 0, "max_price_override": 99,
-                            "max_daily_loss_pct_override": 1.0},
+    # PIPELINE SMOKE TEST — RETIRED 2026-09-15. Not a real strategy, never
+    # tried to be profitable, never used the model's edge estimate — the
+    # point was only to prove evaluate -> approve -> size -> log actually
+    # executes end to end on real rain markets every cycle, back when that
+    # was a genuinely open question. It answered that question long ago:
+    # 24 other strategies have since been built and verified working on
+    # top of the same pipeline. Three independent loss-analysis reviews
+    # flagged it as contributing real losses (paper money) with zero
+    # informational value — it's not testing anything anymore, just
+    # adding noise to the loss count. Explicitly requested: "rain always
+    # trade let's kill it." Kept here, commented out, rather than
+    # deleted, matching bracket_arbitrage's precedent — historical
+    # shadow_trades/decisions rows are left in the database untouched.
+    # "rain_always_trade": {"kind": "always_trade", "risk": "conservative", "category_filter": "Rain",
+    #                         "min_edge_cents_override": 0, "max_price_override": 99,
+    #                         "max_daily_loss_pct_override": 1.0},
     # Arbitrage's "edge" is a guaranteed profit in cents, not a probability
     # edge — a much lower bar clears it (even 1-2c guaranteed is worth
     # taking in theory; real fees would eat small amounts, which is exactly
