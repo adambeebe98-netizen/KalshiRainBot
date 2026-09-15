@@ -121,5 +121,60 @@ class TestSettleResolvedTrades(unittest.TestCase):
         self.assertEqual(shadow_row[0], "won")
 
 
+class TestBackfillMarketOutcomes(unittest.TestCase):
+    """Foundation for retrospective backtesting, explicitly requested:
+    collect data across every scanned market, then later analyze it to
+    find where a profitable trade existed that current strategies
+    missed. That question can only be answered once the real outcome is
+    known for markets nobody ever traded, which is exactly what this
+    fills in."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "market_snapshots", "market_outcomes")
+
+    def _fake_kalshi(self, result_tuple=None, raises=None):
+        kc = MagicMock()
+        if raises:
+            kc.get_market_settlement.side_effect = raises
+        else:
+            kc.get_market_settlement.return_value = result_tuple
+        return kc
+
+    def test_a_real_settled_market_gets_its_outcome_recorded(self):
+        storage.log_market_snapshot("T1", close_time="2020-01-01T00:00:00Z")
+        kc = self._fake_kalshi((True, "yes"))
+        recorded = settlement.backfill_market_outcomes(kc)
+        self.assertEqual(recorded, 1)
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT result FROM market_outcomes WHERE ticker='T1'").fetchone()
+        self.assertEqual(row[0], "yes")
+
+    def test_a_market_not_actually_settled_yet_is_not_falsely_recorded(self):
+        storage.log_market_snapshot("T2", close_time="2020-01-01T00:00:00Z")
+        kc = self._fake_kalshi((False, None))
+        recorded = settlement.backfill_market_outcomes(kc)
+        self.assertEqual(recorded, 0)
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT * FROM market_outcomes WHERE ticker='T2'").fetchone()
+        self.assertIsNone(row)
+
+    def test_an_api_error_is_caught_and_the_ticker_stays_pending(self):
+        storage.log_market_snapshot("T3", close_time="2020-01-01T00:00:00Z")
+        kc = self._fake_kalshi(raises=Exception("404"))
+        recorded = settlement.backfill_market_outcomes(kc)
+        self.assertEqual(recorded, 0)
+        pending = storage.get_tickers_needing_outcome_backfill()
+        self.assertIn("T3", [r["ticker"] for r in pending])
+
+    def test_limit_is_passed_through_correctly(self):
+        for i in range(10):
+            storage.log_market_snapshot(f"MANY-{i}", close_time="2020-01-01T00:00:00Z")
+        kc = self._fake_kalshi((True, "no"))
+        recorded = settlement.backfill_market_outcomes(kc, limit=3)
+        self.assertEqual(recorded, 3)
+
+
 if __name__ == "__main__":
     unittest.main()
