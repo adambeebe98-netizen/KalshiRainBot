@@ -994,6 +994,92 @@ class TestFadeLongshotNearClose(unittest.TestCase):
         self.assertEqual(row[0], "yes")
 
 
+class TestSelfConcentrationDampeningMultiplier(unittest.TestCase):
+    """Pure function tests — see the module-level constants' docstring
+    above for the confirmed real-world motivation (temp_forecast_momentum
+    taking three positions on different thresholds within one event)."""
+
+    def test_zero_prior_positions_gets_full_size(self):
+        self.assertEqual(shadow.self_concentration_dampening_multiplier(0), 1.0)
+
+    def test_one_prior_position_gets_moderate_dampening(self):
+        self.assertEqual(shadow.self_concentration_dampening_multiplier(1), 0.5)
+
+    def test_two_or_more_gets_severe_dampening(self):
+        self.assertEqual(shadow.self_concentration_dampening_multiplier(2), 0.25)
+        self.assertEqual(shadow.self_concentration_dampening_multiplier(10), 0.25)
+
+    def test_never_exceeds_1_across_a_wide_sweep(self):
+        for count in range(0, 50):
+            self.assertLessEqual(shadow.self_concentration_dampening_multiplier(count), 1.0)
+
+
+class TestSelfConcentrationDampeningIntegration(unittest.TestCase):
+    """Direct reproduction of the confirmed real-world scenario:
+    temp_forecast_momentum taking three separate positions on different
+    thresholds within one event (KXLOWTLV-26SEP13), all on zero
+    calibration samples, all lost together."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots", "decisions", "calibration_stats")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_reproduces_the_exact_las_vegas_scenario(self):
+        for i in range(25):
+            calibration.record_outcome("KLAS", "temperature_low", 0.7, i % 10 < 7)
+
+        def sig(ticker):
+            return TradeSignal(ticker=ticker, side="no", model_probability=0.85,
+                                model_probability_yes=0.15, market_implied_probability=0.16,
+                                edge_cents=30, rationale="test")
+
+        kwargs = dict(station_code="KLAS", measure="temperature_low", event_ticker="EVENT1",
+                      current_forecast_temp_f=40.0, previous_forecast_temp_f=45.0)
+
+        shadow.evaluate_and_log("T1", sig("T1"), yes_ask=None, no_ask=60, **kwargs)
+        with storage.get_conn() as conn:
+            row1 = conn.execute(
+                "SELECT count, self_concentration_dampening_multiplier FROM shadow_trades "
+                "WHERE strategy='temp_forecast_momentum' AND ticker='T1'"
+            ).fetchone()
+
+        shadow.evaluate_and_log("T2", sig("T2"), yes_ask=None, no_ask=60, **kwargs)
+        with storage.get_conn() as conn:
+            row2 = conn.execute(
+                "SELECT count, self_concentration_dampening_multiplier FROM shadow_trades "
+                "WHERE strategy='temp_forecast_momentum' AND ticker='T2'"
+            ).fetchone()
+
+        shadow.evaluate_and_log("T3", sig("T3"), yes_ask=None, no_ask=60, **kwargs)
+        with storage.get_conn() as conn:
+            row3 = conn.execute(
+                "SELECT count, self_concentration_dampening_multiplier, rationale FROM shadow_trades "
+                "WHERE strategy='temp_forecast_momentum' AND ticker='T3'"
+            ).fetchone()
+
+        self.assertEqual(row1[1], 1.0)
+        self.assertEqual(row2[1], 0.5)
+        self.assertEqual(row3[1], 0.25)
+        self.assertLess(row3[0], row1[0])
+        self.assertIn("my own positions already open on this event", row3[2])
+
+    def test_a_different_strategys_first_position_is_unaffected(self):
+        sig = TradeSignal(ticker="T1", side="no", model_probability=0.85, model_probability_yes=0.15,
+                           market_implied_probability=0.16, edge_cents=30, rationale="test")
+        storage.log_shadow_trade("temp_forecast_momentum", "OTHER", "no", 10, 40, event_ticker="EVENT1")
+        shadow.evaluate_and_log("T1", sig, yes_ask=None, no_ask=60,
+                                 station_code="KLAS", measure="temperature_low", event_ticker="EVENT1")
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT self_concentration_dampening_multiplier FROM shadow_trades "
+                "WHERE strategy='calibrated_balanced' AND ticker='T1'"
+            ).fetchone()
+        self.assertEqual(row[0], 1.0)
+
+
 class TestFeeExemptionForNoEdgeStrategies(unittest.TestCase):
     """Direct regression test for a real, confirmed bug found while
     building depth_imbalance: gross_expected_cents (edge_cents * contracts)
