@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from datetime import datetime
 import subprocess
 import sys
 import secrets
 import time
 from pathlib import Path
 
-from flask import Flask, request, session, redirect, url_for, render_template_string
+from flask import Flask, request, session, redirect, url_for, render_template_string, send_file
 
 APP_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = APP_DIR / ".env"
@@ -734,6 +736,14 @@ DASHBOARD_PAGE = """
     </details>
 
     <details class="sub">
+      <summary>Data</summary>
+      <div class="sub-body">
+        <p class="subtext">A real, downloadable copy of the live database — every trade, every market snapshot (including markets no strategy ever touched), every settlement outcome. A safe, structurally consistent snapshot even while the bot is actively writing to it.</p>
+        <a href="/download_database"><button type="button">Download database (.db)</button></a>
+      </div>
+    </details>
+
+    <details class="sub">
       <summary class="warn-text">Wipe all paper data</summary>
       <div class="sub-body">
         <p class="subtext">Clears every trade, calibration sample, and retrospective across every strategy — a genuine clean slate. A backup file is saved first, but nothing restores it automatically.</p>
@@ -1014,6 +1024,39 @@ def suggestion_action():
         msg = "Suggestion dismissed."
 
     return redirect(url_for("dashboard", message=msg))
+
+
+@app.route("/download_database", methods=["GET"])
+def download_database():
+    """
+    Serves a real, downloadable copy of the live SQLite database —
+    explicitly requested: data needs to be extractable directly from the
+    droplet, not just summarized as text. A raw copy lets real SQL run
+    against the full dataset (including market_snapshots/market_outcomes,
+    built specifically for retrospective backtesting), which a text
+    export can't offer.
+
+    Uses SQLite's own backup API, not a plain file copy — the bot is
+    continuously writing to this file, and a naive copy could capture a
+    partially-written state mid-transaction. sqlite3's .backup() is
+    exactly the standard, safe way to copy a database that's concurrently
+    in use, producing a single, structurally consistent snapshot.
+    Written to a fixed, reused path (not a new temp file per download) so
+    repeated downloads don't quietly accumulate files on disk.
+    """
+    backup_path = "/tmp/kalshi_bot_export.db"
+    source_conn = sqlite3.connect(storage.SETTINGS.db_path)
+    try:
+        dest_conn = sqlite3.connect(backup_path)
+        try:
+            source_conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+    finally:
+        source_conn.close()
+
+    download_name = f"kalshi_bot_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    return send_file(backup_path, as_attachment=True, download_name=download_name)
 
 
 @app.route("/revert_override", methods=["POST"])
