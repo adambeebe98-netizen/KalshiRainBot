@@ -74,6 +74,83 @@ class TestCalibrationBias(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class TestBiasDampeningNearExtremes(unittest.TestCase):
+    """CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found 14+
+    strategies buying "yes" on a Seattle rain market with raw forecast
+    POP of just 3-6% and no precipitation observed, all losing. The
+    station's learned bias (+0.18, an average correction across whatever
+    raw probability levels were actually seen historically) was applied
+    at full strength to this extreme raw estimate, pushing model_p from
+    ~0.05 to 0.24 -- a flat additive bias has a wildly disproportionate
+    RELATIVE effect near the extremes of the probability scale, which is
+    exactly where the raw signal is most confident and a long-run average
+    correction is least justified."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM calibration_stats")
+            conn.commit()
+
+    def test_dampening_factor_peaks_at_one_half_and_fades_at_extremes(self):
+        self.assertAlmostEqual(calibration._bias_dampening_factor(0.5), 1.0)
+        self.assertLess(calibration._bias_dampening_factor(0.06), 0.3)
+        self.assertLess(calibration._bias_dampening_factor(0.94), 0.3)
+        self.assertAlmostEqual(calibration._bias_dampening_factor(0.0), 0.0)
+        self.assertAlmostEqual(calibration._bias_dampening_factor(1.0), 0.0)
+
+    def test_dampening_factor_never_exceeds_one_across_a_wide_sweep(self):
+        for i in range(101):
+            p = i / 100
+            self.assertLessEqual(calibration._bias_dampening_factor(p), 1.0)
+            self.assertGreaterEqual(calibration._bias_dampening_factor(p), 0.0)
+
+    def test_reproduces_the_exact_confirmed_sea_scenario(self):
+        for i in range(25):
+            calibration.record_outcome("CLISEA", "precipitation_daily", 0.30, i % 25 < 12)
+        n, avg_pred, avg_actual = storage.get_calibration_stats("CLISEA", "precipitation_daily")
+        self.assertAlmostEqual(avg_actual - avg_pred, 0.18, places=2)
+
+        raw_p = 0.06
+        adjusted, note = calibration.apply_calibration(raw_p, "CLISEA", "precipitation_daily")
+        bias, _ = calibration.get_bias("CLISEA", "precipitation_daily")
+        old_undamped = max(0.01, min(0.99, raw_p + bias))
+
+        self.assertAlmostEqual(old_undamped, 0.24, places=2, msg="confirms this matches the reported model_p=0.24")
+        self.assertLess(adjusted, old_undamped, "the dampened result must be meaningfully lower than the old behavior")
+        self.assertLess(adjusted, 0.15, "should stay much closer to the raw 0.06 estimate now")
+        self.assertIn("bias dampened", note)
+
+    def test_moderate_raw_estimates_are_only_lightly_dampened(self):
+        """The PHX good case: bias and situational signal agreed, and the
+        trade won. This fix must not meaningfully damage that case --
+        only severe extremes should be heavily dampened."""
+        for _ in range(25):
+            calibration.record_outcome("CLIPHX", "precipitation_daily", 0.40, False)
+        raw_p = 0.34
+        adjusted, _ = calibration.apply_calibration(raw_p, "CLIPHX", "precipitation_daily")
+        bias, _ = calibration.get_bias("CLIPHX", "precipitation_daily")
+        old_undamped = max(0.01, min(0.99, raw_p + bias))
+
+        self.assertLess(adjusted, raw_p, "should still meaningfully push toward NO")
+        self.assertAlmostEqual(adjusted, old_undamped, delta=0.03,
+                                 msg="a moderate raw estimate should be only lightly dampened, not gutted")
+
+    def test_zero_bias_is_unaffected_by_dampening_regardless_of_raw_estimate(self):
+        """No calibration data yet -- bias is 0, and 0 times any dampening
+        factor is still 0. Must remain a true no-op."""
+        adjusted, _ = calibration.apply_calibration(0.03, "NEVERSEEN", "precipitation_daily")
+        self.assertEqual(adjusted, 0.03)
+
+    def test_note_only_mentions_dampening_when_it_actually_applies(self):
+        for i in range(25):
+            calibration.record_outcome("CLISEA", "precipitation_daily", 0.30, i % 25 < 12)
+        _, note_extreme = calibration.apply_calibration(0.06, "CLISEA", "precipitation_daily")
+        _, note_center = calibration.apply_calibration(0.50, "CLISEA", "precipitation_daily")
+        self.assertIn("bias dampened", note_extreme)
+        self.assertNotIn("bias dampened", note_center, "near 0.5 the dampening factor is ~1.0, negligible correction")
+
+
 class TestIsTrusted(unittest.TestCase):
     """Covers is_trusted() — a different question from get_bias(): not
     "how much correction," but "has this station/measure been directly,
