@@ -138,9 +138,43 @@ def calibration_dampening_multiplier(station_code: str | None, measure: str | No
     return 1.0
 
 
+def _bias_dampening_factor(raw_probability: float) -> float:
+    """
+    How much of the learned bias to actually apply, based on how extreme
+    the RAW (pre-calibration) estimate already is — peaks at 1.0 when
+    raw_probability=0.5, fades to 0 as it approaches 0 or 1. Pure
+    function, same testable-in-isolation reasoning as shadow.py's
+    dampening multipliers: provably stays in [0, 1], never amplifies the
+    bias beyond what it already was.
+
+    CONFIRMED REAL-WORLD MOTIVATION: a loss-analysis review found 14+
+    strategies buying "yes" on a Seattle rain market with raw forecast
+    POP of just 3-6% (raw_probability ~0.03-0.06) and no precipitation
+    observed yet, all losing. The station's learned bias (+0.18) is an
+    AVERAGE correction computed across whatever raw probability levels
+    were actually seen historically — applying that full flat offset to
+    a raw estimate this extreme pushed model_p from ~0.05 to 0.24, a
+    roughly 4x relative swing, versus the same +0.18 applied to a raw
+    0.50 estimate being only a 1.36x swing. The bias correction
+    effectively overrode a forecast and a live observation that both
+    already agreed clearly on "no." Dampening based on how extreme the
+    raw estimate already is doesn't discard the learned bias — it stops
+    a long-run average correction from dominating a case the raw signal
+    is already highly confident about, which is precisely where a flat
+    additive correction is least justified statistically.
+    """
+    return 4 * raw_probability * (1 - raw_probability)
+
+
 def apply_calibration(raw_probability: float, station_code: str | None, measure: str | None) -> tuple[float, str]:
     bias, note = get_bias(station_code, measure)
-    adjusted = max(0.01, min(0.99, raw_probability + bias))
+    dampening = _bias_dampening_factor(raw_probability)
+    effective_bias = bias * dampening
+    adjusted = max(0.01, min(0.99, raw_probability + effective_bias))
+    if dampening < 0.99 and abs(bias) > 0.001:
+        note += (f"; bias dampened to {effective_bias:+.3f} (from {bias:+.3f}) since the raw "
+                 f"estimate ({raw_probability:.2f}) is already far from 0.5 — a flat historical "
+                 f"correction is least justified exactly where the raw signal is most confident")
     return adjusted, note
 
 
