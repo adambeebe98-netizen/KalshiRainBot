@@ -9,6 +9,7 @@ unit test of template internals.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -457,6 +458,63 @@ class TestBotVersionDisplay(DashboardTestCase):
         body = _client().get("/").get_data(as_text=True)
         self.assertIn("def5678", body)
         self.assertIn("Bot version:", body)
+
+
+class TestDownloadDatabase(DashboardTestCase):
+    """Explicitly requested: data needs to be extractable directly from
+    the droplet, not just summarized as text. A real .db copy lets SQL
+    run against the full dataset directly."""
+
+    def test_dashboard_shows_the_download_button(self):
+        body = _client().get("/").get_data(as_text=True)
+        self.assertIn("Download database", body)
+        self.assertIn("/download_database", body)
+
+    def test_download_produces_a_real_queryable_copy_of_the_live_data(self):
+        storage.log_shadow_trade("swing", "T1", "yes", 10, 40, observed_temp_f=88.0)
+        storage.log_market_snapshot("T2", observed_temp_f=75.0, forecast_temp_f=77.0)
+
+        resp = _client().get("/download_database")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers.get("Content-Disposition", "").startswith("attachment"))
+
+        import sqlite3
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            f.write(resp.get_data())
+            temp_path = f.name
+        try:
+            conn = sqlite3.connect(temp_path)
+            row1 = conn.execute("SELECT ticker, observed_temp_f FROM shadow_trades WHERE ticker='T1'").fetchone()
+            row2 = conn.execute("SELECT ticker, forecast_temp_f FROM market_snapshots WHERE ticker='T2'").fetchone()
+            conn.close()
+        finally:
+            os.remove(temp_path)
+        self.assertEqual(row1, ("T1", 88.0))
+        self.assertEqual(row2, ("T2", 77.0))
+
+    def test_download_reflects_current_state_not_a_stale_snapshot(self):
+        storage.log_shadow_trade("swing", "T3", "yes", 10, 40)
+        resp = _client().get("/download_database")
+
+        import sqlite3
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            f.write(resp.get_data())
+            temp_path = f.name
+        try:
+            conn = sqlite3.connect(temp_path)
+            row = conn.execute("SELECT ticker FROM shadow_trades WHERE ticker='T3'").fetchone()
+            conn.close()
+        finally:
+            os.remove(temp_path)
+        self.assertIsNotNone(row)
+
+    def test_unauthenticated_request_is_rejected_not_served(self):
+        client_no_auth = webapp.app.test_client()  # deliberately not authenticated
+        resp = client_no_auth.get("/download_database", follow_redirects=False)
+        self.assertIn(resp.status_code, (302, 401, 403))
+        self.assertIsNone(resp.headers.get("Content-Disposition"))
 
 
 if __name__ == "__main__":
