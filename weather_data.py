@@ -158,6 +158,14 @@ STATION_REFERENCE = {
     # unchanged, so this resolves correctly regardless of whether
     # rules_extractor returns "KPVD" or "CLIPVD".
     "KPVD": {"name": "Providence T.F. Green Intl", "lat": 41.7326, "lon": -71.4204},
+    # Formerly Palm Beach Intl (KPBI) — CONFIRMED via an official NWS
+    # Service Change Notice (scn26-56) and FAA Notice 8900.780: the
+    # airport was renamed "President Donald J. Trump International
+    # Airport" effective July 9, 2026, and unusually the ICAO code itself
+    # changed (not just the commercial IATA code) from KPBI to KDJT —
+    # NWS's own systems, including api.weather.gov, key on this new code
+    # as of that date. Same physical location/coordinates as before.
+    "KDJT": {"name": "President Donald J. Trump Intl (fmr. Palm Beach Intl)", "lat": 26.6831, "lon": -80.0956},
 }
 
 
