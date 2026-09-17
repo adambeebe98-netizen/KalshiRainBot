@@ -260,6 +260,16 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     when NONE of them cleanly apply to this specific market's text (see
     series_template.py for why a match is provably safe, not a guess).
     Returns the list, so the caller can pass it into the next market.
+
+    settlement_source and confidence are series-wide constants so they
+    stay accurate under template reuse. threshold_description does NOT
+    -- it's the first market's own descriptive text (e.g. "strictly
+    greater than 96F"), carried over as-is for every market reusing that
+    template rather than regenerated per threshold. Left this way
+    deliberately: it's purely descriptive, never used in a calculation
+    (threshold_low_f/threshold_high_f themselves stay fully accurate per
+    market regardless), and not worth the added complexity for a field
+    explicitly called non-critical.
     """
     if templates is None:
         templates = []
@@ -291,6 +301,8 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
         station_code=rules.station_code, measure=rules.measure,
         threshold_low_f=rules.threshold_low_f, threshold_high_f=rules.threshold_high_f,
         open_time=open_time, close_time=close_time, result=result,
+        settlement_source=rules.settlement_source, threshold_description=rules.threshold_description,
+        confidence=rules.confidence,
     )
 
     start_ts = _parse_iso_to_unix(open_time)
