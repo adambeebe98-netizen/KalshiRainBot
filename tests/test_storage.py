@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 import unittest
+from unittest.mock import patch
 
 from tests.helpers import use_temp_db
 
@@ -799,6 +800,96 @@ class TestHistoricalMarketSettlementSourceFields(unittest.TestCase):
         self.assertIsNone(market["settlement_source"])
         self.assertIsNone(market["threshold_description"])
         self.assertIsNone(market["confidence"])
+
+
+class TestHistoricalPriceAndWeatherUniqueness(unittest.TestCase):
+    """CONFIRMED NEEDED: unlike historical_markets (a true PRIMARY KEY on
+    ticker since it was created), historical_price_points and
+    historical_weather_points only ever had id INTEGER PRIMARY KEY
+    AUTOINCREMENT as their key -- the (ticker, ts) / (station_code, ts)
+    index existed for query speed only, never uniqueness. Reprocessing
+    the same ticker before the application-level "already stored, skip"
+    guard existed (which happened across several restarts on the live
+    droplet tonight) could insert duplicate rows with no error at all."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM historical_price_points")
+            conn.execute("DELETE FROM historical_weather_points")
+            conn.commit()
+
+    def test_price_points_unique_index_actually_exists(self):
+        with storage.get_conn() as conn:
+            idx = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='idx_historical_price_points_ticker_ts'"
+            ).fetchone()
+        self.assertIn("UNIQUE", idx[0].upper())
+
+    def test_weather_points_unique_index_actually_exists(self):
+        with storage.get_conn() as conn:
+            idx = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='idx_historical_weather_points_station_ts'"
+            ).fetchone()
+        self.assertIn("UNIQUE", idx[0].upper())
+
+    def test_reinserting_the_same_price_point_is_silently_ignored(self):
+        storage.save_historical_price_points("T1", [(1000, 50, 10)])
+        storage.save_historical_price_points("T1", [(1000, 999, 999)])  # same key, different values
+        with storage.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT yes_price_cents, volume FROM historical_price_points WHERE ticker='T1' AND ts=1000"
+            ).fetchall()
+        self.assertEqual(len(rows), 1, "should never have more than one row for the same (ticker, ts)")
+        self.assertEqual(rows[0], (50, 10), "the FIRST insert should win; a duplicate insert is ignored, not applied")
+
+    def test_reinserting_the_same_weather_point_is_silently_ignored(self):
+        storage.save_historical_weather_points("KAUS", [(1000, 85.0, 10.0, 84.0, 0.0)])
+        storage.save_historical_weather_points("KAUS", [(1000, 999.0, 999.0, 999.0, 999.0)])
+        with storage.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT forecast_temp_f FROM historical_weather_points WHERE station_code='KAUS' AND ts=1000"
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 85.0)
+
+    def test_preexisting_duplicates_do_not_crash_init_db(self):
+        """The live trading bot calls init_db() on every single startup
+        -- this migration must NEVER be able to break that, even on a
+        database that already has real duplicate rows from before this
+        protection existed. Uses its own dedicated database file rather
+        than the shared test fixture, since the shared one already has
+        the UNIQUE index from earlier tests in this class -- inserting a
+        duplicate directly into it would correctly fail at the insert
+        itself, never reaching the scenario this test needs."""
+        import os
+        import sqlite3
+        import tempfile
+        import dataclasses
+        import storage as storage_module
+
+        tmp_path = tempfile.mktemp(suffix=".db")
+        try:
+            conn = sqlite3.connect(tmp_path)
+            conn.executescript(storage_module.SCHEMA)
+            conn.execute("INSERT INTO historical_price_points (ticker, ts, yes_price_cents, volume) "
+                          "VALUES ('DUPE', 5000, 10, 1)")
+            conn.execute("INSERT INTO historical_price_points (ticker, ts, yes_price_cents, volume) "
+                          "VALUES ('DUPE', 5000, 10, 1)")
+            conn.commit()
+            conn.close()
+
+            patched_settings = dataclasses.replace(storage_module.SETTINGS, db_path=tmp_path)
+            with patch.object(storage_module, "SETTINGS", patched_settings):
+                storage_module.init_db()  # must not raise
+                with storage_module.get_conn() as conn2:
+                    count = conn2.execute(
+                        "SELECT COUNT(*) FROM historical_price_points WHERE ticker='DUPE' AND ts=5000"
+                    ).fetchone()[0]
+            self.assertEqual(count, 2, "existing duplicate data must be left alone, not silently deleted")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 
 if __name__ == "__main__":
