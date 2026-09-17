@@ -151,6 +151,13 @@ STATION_REFERENCE = {
     "KEWR": {"name": "Newark Liberty Intl", "lat": 40.6925, "lon": -74.1686},
     "KSDF": {"name": "Louisville Muhammad Ali Intl", "lat": 38.1742, "lon": -85.7364},
     "KTTN": {"name": "Trenton-Mercer", "lat": 40.2767, "lon": -74.8133},
+    # KXRAIN base series (e.g. KXRAIN-26SEP16-PROV) confirmed via real
+    # rules text to settle at KPVD directly -- the real ICAO code, not
+    # Kalshi's usual CLI+suffix wrapper. kalshi_station_to_nws_id passes
+    # through anything that doesn't match the CLI+6-char pattern
+    # unchanged, so this resolves correctly regardless of whether
+    # rules_extractor returns "KPVD" or "CLIPVD".
+    "KPVD": {"name": "Providence T.F. Green Intl", "lat": 41.7326, "lon": -71.4204},
 }
 
 
