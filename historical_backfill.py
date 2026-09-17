@@ -34,6 +34,7 @@ import historical_weather
 import storage
 from kalshi_client import KalshiClient
 from rules_extractor import RulesExtractor
+from series_template import SeriesTemplate, build_template, try_apply_template
 from weather_data import STATION_REFERENCE, kalshi_station_to_nws_id
 
 log = logging.getLogger("historical_backfill")
@@ -230,18 +231,36 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
 
 
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
-                          series_ticker: str, candlestick_interval: int = 60) -> None:
+                          series_ticker: str, candlestick_interval: int = 60,
+                          template: SeriesTemplate | None = None) -> SeriesTemplate | None:
     """
     Backfills everything for one already-settled market: rules
     extraction, price history, and (if not already covered) its
     station's weather. Any single failure here should be caught by the
     caller and logged, not allowed to abort the whole series.
+
+    template, when provided, is tried FIRST -- Adam's insight, confirmed
+    correct: within one series, every market's rules text is the same
+    template with only the date and threshold substituted, so calling
+    the LLM separately for every single market (confirmed live: 3,700+
+    distinct tickers for Austin alone) was wasteful past the first one.
+    A full LLM extraction only happens when no template exists yet, or
+    the current one doesn't cleanly apply to this specific market's text
+    (see series_template.py for why that's provably safe rather than a
+    guess). Returns the (possibly newly-learned) template so the caller
+    can reuse it for the series' next market.
     """
     ticker = market_obj["ticker"]
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
-    rules = extractor.extract(ticker, rules_text)
-    rules.station_code = apply_station_override(series_ticker, rules.station_code)
+    rules = try_apply_template(template, rules_text, ticker) if template is not None else None
+
+    if rules is None:
+        rules = extractor.extract(ticker, rules_text)
+        rules.station_code = apply_station_override(series_ticker, rules.station_code)
+        new_template = build_template(rules_text, rules, market_obj.get("occurrence_datetime"))
+        if new_template is not None:
+            template = new_template
 
     open_time = market_obj.get("open_time")
     close_time = market_obj.get("close_time")
@@ -258,7 +277,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     end_ts = _parse_iso_to_unix(close_time)
     if start_ts is None or end_ts is None:
         log.warning(f"{ticker}: missing/malformed open_time or close_time — skipping price/weather backfill")
-        return
+        return template
 
     candlestick_data = kalshi.get_historical_candlesticks(
         series_ticker, ticker, start_ts, end_ts, period_interval=candlestick_interval
@@ -272,6 +291,8 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
 
     if rules.station_code:
         backfill_weather_for_station(rules.station_code, start_ts, end_ts)
+
+    return template
 
 
 def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_ticker: str,
@@ -305,6 +326,7 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
     failed = 0
     skipped_too_old = 0
     cursor = None
+    template: SeriesTemplate | None = None  # learned from the first market, reused for the rest of this series
 
     while True:
         page = kalshi.get_historical_markets(series_ticker=series_ticker, cursor=cursor)
@@ -322,7 +344,8 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
             page_has_any_in_range = True
 
             try:
-                backfill_one_market(kalshi, extractor, market_obj, series_ticker, candlestick_interval)
+                template = backfill_one_market(kalshi, extractor, market_obj, series_ticker,
+                                                 candlestick_interval, template)
                 processed += 1
             except Exception as e:
                 log.warning(f"Failed to backfill {ticker}: {e}")
