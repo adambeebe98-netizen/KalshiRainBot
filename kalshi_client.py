@@ -134,6 +134,36 @@ class KalshiClient:
     def get_market(self, ticker: str) -> dict:
         return self._request("GET", f"/markets/{ticker}")
 
+    def get_historical_markets(self, series_ticker: str | None = None,
+                                 cursor: str | None = None, limit: int = 200) -> dict:
+        """
+        Settled markets older than Kalshi's live/historical cutoff (see
+        https://docs.kalshi.com/getting_started/historical_data) —
+        foundation for retrospective backtesting against years of real
+        weather-market history, not just data collected going forward.
+        Same cursor-based pagination as the live /markets endpoint;
+        callers page through with the returned cursor until it's empty.
+        """
+        params: dict = {"limit": limit, "status": "settled"}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/historical/markets", params=params)
+
+    def get_historical_candlesticks(self, series_ticker: str, ticker: str,
+                                      start_ts: int, end_ts: int,
+                                      period_interval: int = 60) -> dict:
+        """
+        Real price history for an already-settled market — the actual
+        bid/ask trajectory over its life, not just its final price.
+        period_interval is in minutes; Kalshi only accepts 1, 60, or 1440.
+        """
+        return self._request(
+            "GET", f"/historical/markets/{ticker}/candlesticks",
+            params={"start_ts": start_ts, "end_ts": end_ts, "period_interval": period_interval},
+        )
+
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
         return self._request("GET", f"/markets/{ticker}/orderbook", params={"depth": depth})
 
