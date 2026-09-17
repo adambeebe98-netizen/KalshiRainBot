@@ -142,6 +142,15 @@ STATION_REFERENCE = {
     "KMIA": {"name": "Miami Intl", "lat": 25.7932, "lon": -80.2906},
     "KLAX": {"name": "Los Angeles Intl", "lat": 33.9425, "lon": -118.4080},
     "KIAH": {"name": "Houston George Bush Intercontinental", "lat": 29.9844, "lon": -95.3414},
+    # CONFIRMED via a COMPLETE, definitive enumeration of every real KXRAIN/
+    # KXHIGH/KXLOW series Kalshi currently lists (not another one-at-a-time
+    # discovery) — cross-referenced every series' city suffix against this
+    # table using the exact CLI+suffix -> K+suffix pattern already
+    # confirmed correct for every other city tonight. These 3 were the
+    # only ones still missing.
+    "KEWR": {"name": "Newark Liberty Intl", "lat": 40.6925, "lon": -74.1686},
+    "KSDF": {"name": "Louisville Muhammad Ali Intl", "lat": 38.1742, "lon": -85.7364},
+    "KTTN": {"name": "Trenton-Mercer", "lat": 40.2767, "lon": -74.8133},
 }
 
 
