@@ -121,6 +121,16 @@ STATION_REFERENCE = {
     "KSFO": {"name": "San Francisco Intl", "lat": 37.6213, "lon": -122.3790},
     "KMSY": {"name": "New Orleans Louis Armstrong Intl", "lat": 29.9934, "lon": -90.2580},
     "KOKC": {"name": "Oklahoma City Will Rogers World", "lat": 35.3931, "lon": -97.6007},
+    # CONFIRMED MISSING LIVE: a historical backfill run surfaced 3 real
+    # NYC high-temperature markets whose rules text clearly said "Central
+    # Park, New York" and settled correctly (result: yes/no both present),
+    # but station_code came back None from rules_extractor's cache and
+    # KNYC was never in this table at all — meaning even a CORRECTLY
+    # extracted "CLINYC" would still have failed to resolve lat/lon here,
+    # blocking every NYC high-temp market's forecast lookup regardless of
+    # the extraction question. Coordinates verified directly against
+    # weather.gov's own station database (WMO id 72506).
+    "KNYC": {"name": "New York Central Park", "lat": 40.7790, "lon": -73.9692},
 }
 
 
