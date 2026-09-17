@@ -144,6 +144,57 @@ def _extract_candlestick_price_cents(candle: dict) -> int | None:
     return None
 
 
+def _extract_dollar_field_cents(value: str | None) -> int | None:
+    """Same dollar-string safety as _extract_candlestick_price_cents,
+    for a single already-known field rather than a fallback chain."""
+    if value is None:
+        return None
+    try:
+        return round(float(value) * 100)
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_bid_ask_and_open_interest(candle: dict) -> tuple[int | None, int | None, int | None]:
+    """
+    The actual bid/ask spread and open interest per hour -- previously
+    fetched from this exact same candlestick response but discarded,
+    collapsing into a single "best price" number. The spread is one of
+    the clearest available signals of how liquid or thin a market was
+    at a given moment, directly relevant to swing-trading pattern
+    analysis rather than just calibration. open_interest (contracts
+    genuinely outstanding) is a distinct, complementary signal from
+    volume (contracts traded), also already present in this same
+    response and previously unused.
+    """
+    yes_bid = candle.get("yes_bid") or {}
+    yes_ask = candle.get("yes_ask") or {}
+    bid_cents = _extract_dollar_field_cents(yes_bid.get("close"))
+    ask_cents = _extract_dollar_field_cents(yes_ask.get("close"))
+    open_interest = None
+    if candle.get("open_interest") is not None:
+        try:
+            open_interest = round(float(candle["open_interest"]))
+        except (ValueError, TypeError):
+            open_interest = None
+    return bid_cents, ask_cents, open_interest
+
+
+def _parse_expiration_value(value: str | None) -> float | None:
+    """Kalshi's real, official settlement value (e.g. "85.00" for a
+    high-temp market) -- a direct physical measurement (degrees, inches),
+    NOT a dollar price, so unlike candlestick prices this is never
+    multiplied by 100. Enables checking reconstructed weather data
+    against real ground truth at scale later, not just a handful of
+    markets by hand."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_volume(candle: dict) -> int | None:
     volume_str = candle.get("volume")
     if volume_str is None:
@@ -327,7 +378,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
         threshold_low_f=rules.threshold_low_f, threshold_high_f=rules.threshold_high_f,
         open_time=open_time, close_time=close_time, result=result,
         settlement_source=rules.settlement_source, threshold_description=rules.threshold_description,
-        confidence=rules.confidence,
+        confidence=rules.confidence, expiration_value=_parse_expiration_value(market_obj.get("expiration_value")),
     )
 
     start_ts = _parse_iso_to_unix(open_time)
@@ -340,10 +391,13 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
         series_ticker, ticker, start_ts, end_ts, period_interval=candlestick_interval
     )
     candles = candlestick_data.get("candlesticks", [])
-    price_points = [
-        (c["end_period_ts"], _extract_candlestick_price_cents(c), _extract_volume(c))
-        for c in candles if "end_period_ts" in c
-    ]
+    price_points = []
+    for c in candles:
+        if "end_period_ts" not in c:
+            continue
+        bid, ask, oi = _extract_bid_ask_and_open_interest(c)
+        price_points.append((c["end_period_ts"], _extract_candlestick_price_cents(c), _extract_volume(c),
+                              bid, ask, oi))
     storage.save_historical_price_points(ticker, price_points)
 
     if rules.station_code:
