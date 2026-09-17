@@ -254,6 +254,53 @@ class TestBackfillOneMarket(unittest.TestCase):
         mock_weather.assert_not_called()
 
 
+class TestSkipAlreadyStoredMarket(unittest.TestCase):
+    """CONFIRMED LIVE: restarting the backfill script for a code fix
+    re-discovers all series fresh every time and has no memory of which
+    series already finished in an earlier run -- observed directly:
+    Austin's ~4,000 markets started reprocessing from scratch after a
+    routine restart, wasting real Kalshi/LLM API calls redoing
+    identical work. This is what makes every future restart pick back
+    up near where it left off instead."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM historical_markets")
+            conn.commit()
+
+    def test_second_call_on_the_same_ticker_skips_expensive_work(self):
+        from rules_extractor import MarketRules
+
+        kalshi = MagicMock()
+        kalshi.get_historical_market_rules_text.return_value = "some rules text"
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="T1", station_code="CLIAUS", settlement_source="NWS", measure="temperature_high",
+            threshold_description="x", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=90.0001, threshold_high_f=None,
+        )
+        market_obj = {"ticker": "T1", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-02T00:00:00Z",
+                       "occurrence_datetime": "2026-01-01T14:00:00Z", "result": "yes"}
+
+        with patch.object(hb, "backfill_weather_for_station"):
+            hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS")
+
+        self.assertEqual(kalshi.get_historical_market_rules_text.call_count, 1)
+        self.assertEqual(kalshi.get_historical_candlesticks.call_count, 1)
+
+        with patch.object(hb, "backfill_weather_for_station") as mock_weather2:
+            hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS")
+
+        self.assertEqual(kalshi.get_historical_market_rules_text.call_count, 1,
+                          "should not re-fetch rules text for an already-stored ticker")
+        self.assertEqual(kalshi.get_historical_candlesticks.call_count, 1,
+                          "should not re-fetch candlesticks for an already-stored ticker")
+        self.assertEqual(mock_weather2.call_count, 1,
+                          "should still defensively re-check weather coverage even on a skip")
+
+
 class TestBackfillSeries(unittest.TestCase):
     def setUp(self):
         storage.init_db()
