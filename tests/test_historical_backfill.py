@@ -490,10 +490,10 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
              "occurrence_datetime": "2026-07-18T14:00:00Z", "result": "no"},
         ]
 
-        template = None
+        templates = None
         with patch.object(hb, "backfill_weather_for_station"):
             for m in markets:
-                template = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHNY", template=template)
+                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHNY", templates=templates)
 
         self.assertEqual(extractor.extract.call_count, 1, "should only call the LLM once, for the first market")
 
@@ -538,6 +538,73 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         self.assertEqual(extractor.extract.call_count, 1)
         stored_m2 = storage.get_historical_market("M2")
         self.assertAlmostEqual(stored_m2["threshold_low_f"], 85.0001, places=3)
+
+    def test_interleaved_wordings_are_both_remembered_not_flip_flopped(self):
+        """CONFIRMED LIVE: a single-remembered-template design caused
+        Chicago's real throughput to drop to ~35 markets/minute versus
+        Austin's ~200/minute -- directly confirmed via LLM cache growth
+        that roughly a third of Chicago's markets still triggered a
+        fresh LLM call, consistent with two genuinely different
+        wordings (T-style vs B-style tickers) being interleaved and
+        repeatedly overwriting a single remembered template. This
+        reproduces that exact interleaved pattern directly."""
+        from rules_extractor import MarketRules
+
+        kalshi = MagicMock()
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        texts = {
+            "T1": "If the high temp for Sep 17, 2026 is greater than 90, resolves Yes.",
+            "B1": "Settles YES if the high temp for Sep 17, 2026 falls between 88 and 90.",
+            "T2": "If the high temp for Sep 16, 2026 is greater than 85, resolves Yes.",
+            "B2": "Settles YES if the high temp for Sep 16, 2026 falls between 82 and 84.",
+            "T3": "If the high temp for Sep 15, 2026 is greater than 80, resolves Yes.",
+        }
+        kalshi.get_historical_market_rules_text.side_effect = lambda t: texts[t]
+
+        extractor = MagicMock()
+        call_log = []
+
+        def fake_extract(ticker, rules_text, force=False):
+            call_log.append(ticker)
+            if ticker == "T1":
+                return MarketRules(ticker=ticker, station_code="CLIORD", settlement_source="NWS",
+                                     measure="temperature_high", threshold_description="x",
+                                     trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                                     threshold_low_f=90.0001, threshold_high_f=None)
+            elif ticker == "B1":
+                return MarketRules(ticker=ticker, station_code="CLIORD", settlement_source="NWS",
+                                     measure="temperature_high", threshold_description="x",
+                                     trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                                     threshold_low_f=88.0, threshold_high_f=90.0)
+        extractor.extract.side_effect = fake_extract
+
+        markets = [
+            {"ticker": "T1", "open_time": "2026-09-16T00:00:00Z", "close_time": "2026-09-18T00:00:00Z",
+             "occurrence_datetime": "2026-09-17T00:00:00Z", "result": "yes"},
+            {"ticker": "B1", "open_time": "2026-09-16T00:00:00Z", "close_time": "2026-09-18T00:00:00Z",
+             "occurrence_datetime": "2026-09-17T00:00:00Z", "result": "no"},
+            {"ticker": "T2", "open_time": "2026-09-15T00:00:00Z", "close_time": "2026-09-17T00:00:00Z",
+             "occurrence_datetime": "2026-09-16T00:00:00Z", "result": "no"},
+            {"ticker": "B2", "open_time": "2026-09-15T00:00:00Z", "close_time": "2026-09-17T00:00:00Z",
+             "occurrence_datetime": "2026-09-16T00:00:00Z", "result": "yes"},
+            {"ticker": "T3", "open_time": "2026-09-14T00:00:00Z", "close_time": "2026-09-16T00:00:00Z",
+             "occurrence_datetime": "2026-09-15T00:00:00Z", "result": "no"},
+        ]
+
+        templates = None
+        with patch.object(hb, "backfill_weather_for_station"):
+            for m in markets:
+                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
+
+        self.assertEqual(call_log, ["T1", "B1"], "each wording should only need one real LLM call, ever")
+
+        for ticker, expected in [("T2", 85.0001), ("T3", 80.0001)]:
+            stored = storage.get_historical_market(ticker)
+            self.assertAlmostEqual(stored["threshold_low_f"], expected, places=3)
+
+        stored_b2 = storage.get_historical_market("B2")
+        self.assertEqual(stored_b2["threshold_low_f"], 82.0)
+        self.assertEqual(stored_b2["threshold_high_f"], 84.0)
 
 
 if __name__ == "__main__":
