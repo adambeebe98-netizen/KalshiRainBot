@@ -285,6 +285,12 @@ CREATE TABLE IF NOT EXISTS historical_markets (
     open_time TEXT,
     close_time TEXT,
     result TEXT,              -- 'yes' or 'no', once known
+    expiration_value REAL,    -- Kalshi's own real, official settlement value
+                               -- (e.g. 85.0 for a high-temp market) -- already
+                               -- present on every market fetched, previously
+                               -- discarded; enables checking reconstructed
+                               -- weather data against real ground truth at
+                               -- scale, not just a handful of markets by hand
     settlement_source TEXT,   -- e.g. 'NWS', 'The Weather Company' — extracted all along but discarded before
     threshold_description TEXT,  -- plain-language threshold, e.g. 'strictly greater than 96F'
     confidence TEXT,          -- rules_extractor's own confidence in this extraction: 'high'|'medium'|'low'
@@ -302,7 +308,13 @@ CREATE TABLE IF NOT EXISTS historical_price_points (
     ticker TEXT NOT NULL,
     ts INTEGER NOT NULL,       -- candlestick end timestamp, Unix seconds
     yes_price_cents INTEGER,   -- candlestick close price
-    volume INTEGER
+    volume INTEGER,
+    yes_bid_cents INTEGER,     -- the actual bid at this hour -- previously
+    yes_ask_cents INTEGER,     -- fetched but discarded; bid/ask spread is
+                               -- one of the clearest signals of how liquid
+                               -- a market was at a given moment
+    open_interest INTEGER      -- contracts genuinely outstanding, distinct
+                               -- from volume (contracts traded)
 );
 CREATE INDEX IF NOT EXISTS idx_historical_price_points_ticker_ts ON historical_price_points(ticker, ts);
 
@@ -422,6 +434,10 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE historical_markets ADD COLUMN settlement_source TEXT",
         "ALTER TABLE historical_markets ADD COLUMN threshold_description TEXT",
         "ALTER TABLE historical_markets ADD COLUMN confidence TEXT",
+        "ALTER TABLE historical_markets ADD COLUMN expiration_value REAL",
+        "ALTER TABLE historical_price_points ADD COLUMN yes_bid_cents INTEGER",
+        "ALTER TABLE historical_price_points ADD COLUMN yes_ask_cents INTEGER",
+        "ALTER TABLE historical_price_points ADD COLUMN open_interest INTEGER",
     ):
         try:
             conn.execute(stmt)
@@ -1530,7 +1546,7 @@ def save_historical_market(ticker: str, series_ticker: str | None = None,
                              threshold_high_f: float | None = None, open_time: str | None = None,
                              close_time: str | None = None, result: str | None = None,
                              settlement_source: str | None = None, threshold_description: str | None = None,
-                             confidence: str | None = None) -> None:
+                             confidence: str | None = None, expiration_value: float | None = None) -> None:
     """Idempotent by design (INSERT OR REPLACE on the ticker primary key)
     — the backfill script can safely be re-run over a series it's already
     partly processed without creating duplicates or needing its own
@@ -1540,11 +1556,11 @@ def save_historical_market(ticker: str, series_ticker: str | None = None,
             "INSERT OR REPLACE INTO historical_markets "
             "(ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f, "
             "threshold_high_f, open_time, close_time, result, settlement_source, "
-            "threshold_description, confidence, backfilled_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "threshold_description, confidence, expiration_value, backfilled_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f,
              threshold_high_f, open_time, close_time, result, settlement_source,
-             threshold_description, confidence, int(time.time())),
+             threshold_description, confidence, expiration_value, int(time.time())),
         )
 
 
@@ -1555,17 +1571,20 @@ def get_historical_market(ticker: str) -> dict | None:
         return dict(row) if row else None
 
 
-def save_historical_price_points(ticker: str, points: list[tuple[int, int | None, int | None]]) -> None:
-    """points: list of (ts, yes_price_cents, volume). Bulk insert — a
-    single historical market's candlesticks can be hundreds of points,
-    and this is called once per market during backfill, not once per
-    point."""
+def save_historical_price_points(ticker: str,
+                                   points: list[tuple[int, int | None, int | None, int | None, int | None, int | None]]) -> None:
+    """points: list of (ts, yes_price_cents, volume, yes_bid_cents,
+    yes_ask_cents, open_interest). Bulk insert — a single historical
+    market's candlesticks can be hundreds of points, and this is called
+    once per market during backfill, not once per point."""
     if not points:
         return
     with get_conn() as conn:
         conn.executemany(
-            "INSERT OR IGNORE INTO historical_price_points (ticker, ts, yes_price_cents, volume) VALUES (?,?,?,?)",
-            [(ticker, ts, price, vol) for ts, price, vol in points],
+            "INSERT OR IGNORE INTO historical_price_points "
+            "(ticker, ts, yes_price_cents, volume, yes_bid_cents, yes_ask_cents, open_interest) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(ticker, ts, price, vol, bid, ask, oi) for ts, price, vol, bid, ask, oi in points],
         )
 
 
