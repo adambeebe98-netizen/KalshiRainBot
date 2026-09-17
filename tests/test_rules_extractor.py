@@ -183,5 +183,68 @@ class TestMarketRulesDefaults(unittest.TestCase):
         self.assertIsNone(rules.threshold_high_f)
 
 
+class TestThresholdRecoveryFromDescription(unittest.TestCase):
+    """CONFIRMED LIVE, at real scale: the LLM sometimes returns a fully
+    correct threshold_description while independently leaving both
+    threshold_low_f and threshold_high_f null in the same response --
+    found affecting ~4-5% of markets overall, confirmed to spike as
+    high as 66% for one specific series (KXHIGHNY), where it broke the
+    template system entirely: build_template needs a real threshold to
+    work from, so the series' dominant wording never successfully
+    formed a reusable template, and nearly every market needed its own
+    fresh LLM call as a result."""
+
+    def test_recovers_greater_than_from_description(self):
+        from rules_extractor import _recover_threshold_from_description
+        low, high = _recover_threshold_from_description("strictly greater than 91 degrees Fahrenheit")
+        self.assertEqual(low, 91.0001)
+        self.assertIsNone(high)
+
+    def test_recovers_less_than_from_description(self):
+        from rules_extractor import _recover_threshold_from_description
+        low, high = _recover_threshold_from_description("strictly less than 88°F")
+        self.assertIsNone(low)
+        self.assertEqual(high, 87.9999)
+
+    def test_genuine_extraction_failure_is_not_guessed_at(self):
+        from rules_extractor import _recover_threshold_from_description
+        low, high = _recover_threshold_from_description("extraction failed — parse manually")
+        self.assertIsNone(low)
+        self.assertIsNone(high)
+
+    def test_none_description_handled_safely(self):
+        from rules_extractor import _recover_threshold_from_description
+        low, high = _recover_threshold_from_description(None)
+        self.assertIsNone(low)
+        self.assertIsNone(high)
+
+    def test_full_extract_call_recovers_the_exact_real_ny_bug(self):
+        import os
+        os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import rules_extractor as re_module
+
+        cache_path = tempfile.mktemp(suffix=".json")
+        extractor = re_module.RulesExtractor(cache_path=cache_path)
+
+        fake_response = MagicMock()
+        fake_response.content = [MagicMock(text="""{
+            "station_code": "CLINYC", "settlement_source": "NWS", "measure": "temperature_high",
+            "threshold_description": "strictly greater than 91 degrees Fahrenheit",
+            "trace_counts_as_zero": null, "fallback_rule": null, "confidence": "high",
+            "threshold_low_f": null, "threshold_high_f": null
+        }""")]
+
+        try:
+            with patch.object(extractor._client.messages, "create", return_value=fake_response):
+                result = extractor.extract("KXHIGHNY-26SEP09-T91", "some real rules text here")
+            self.assertEqual(result.threshold_low_f, 91.0001)
+            self.assertIsNone(result.threshold_high_f)
+        finally:
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+
+
 if __name__ == "__main__":
     unittest.main()
