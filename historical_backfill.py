@@ -270,11 +270,36 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     (threshold_low_f/threshold_high_f themselves stay fully accurate per
     market regardless), and not worth the added complexity for a field
     explicitly called non-critical.
+
+    Skips the expensive work (rules extraction, candlestick fetch) if
+    this exact ticker is already stored -- CONFIRMED LIVE: restarting
+    the backfill script for a code fix re-discovers all series fresh
+    every time and has no memory of which series already finished in an
+    earlier run, so without this check a restart genuinely redoes real
+    API work for an entire already-completed series (observed directly:
+    Austin's ~4,000 markets started reprocessing from scratch after a
+    routine restart). This makes every future restart, for any reason,
+    pick back up near where it actually left off instead. Still
+    defensively re-checks weather coverage even on a skip (a cheap DB
+    lookup, not an API call) -- an earlier run could in principle have
+    crashed between storing the market record and finishing its weather
+    backfill, and this closes that gap rather than leaving it permanent.
     """
     if templates is None:
         templates = []
 
     ticker = market_obj["ticker"]
+
+    already_stored = storage.get_historical_market(ticker)
+    if already_stored is not None:
+        station = already_stored.get("station_code")
+        open_time = already_stored.get("open_time")
+        close_time = already_stored.get("close_time")
+        start_ts = _parse_iso_to_unix(open_time)
+        end_ts = _parse_iso_to_unix(close_time)
+        if station and start_ts is not None and end_ts is not None:
+            backfill_weather_for_station(station, start_ts, end_ts)
+        return templates
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
     rules = None
