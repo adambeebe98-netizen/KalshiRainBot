@@ -151,6 +151,24 @@ class KalshiClient:
             params["cursor"] = cursor
         return self._request("GET", "/historical/markets", params=params)
 
+    def get_historical_market_detail(self, ticker: str) -> dict:
+        """
+        A single historical market by ticker — separate from get_market()
+        deliberately: get_market() hits the LIVE /markets/{ticker}
+        endpoint, which per Kalshi's own docs will NOT return a market
+        that settled before the live/historical cutoff (a rolling ~3
+        month window). Any market old enough to need backfilling is
+        almost certainly past that cutoff.
+        """
+        return self._request("GET", f"/historical/markets/{ticker}")
+
+    def get_historical_market_rules_text(self, ticker: str) -> str:
+        """Historical counterpart to get_market_rules_text — same field
+        extraction, but from the historical market detail endpoint so it
+        actually returns something for an old, settled market."""
+        market = self.get_historical_market_detail(ticker).get("market", {})
+        return market.get("rules_primary", "") or market.get("rules_secondary", "") or ""
+
     def get_historical_candlesticks(self, series_ticker: str, ticker: str,
                                       start_ts: int, end_ts: int,
                                       period_interval: int = 60) -> dict:
