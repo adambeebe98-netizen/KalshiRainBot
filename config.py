@@ -102,8 +102,22 @@ class Settings:
         ).split(",") if t.strip()
     )
     auto_discover_series: bool = _bool("AUTO_DISCOVER_SERIES", True)
+    # CONFIRMED LIVE: a bare "rain" keyword is a naive case-insensitive
+    # substring match against every series ticker AND title (see
+    # KalshiClient.discover_series_tickers) — it doesn't just match KXRAIN
+    # variants, it also matches "d-RAIN-theswamp" and "uk-RAIN-e" (both
+    # real, confirmed discovered series: KXDRAINTHESWAMP, KXELECTUKRAINE,
+    # KXUKRAINEEU). "KXRAIN" instead still matches every real rain series
+    # (KXRAIN, KXRAINNYCM, KXRAINSEAM, etc.) while excluding those.
+    # KXHIGH/KXLOW are NOT similarly tightened — Kalshi genuinely reuses
+    # that exact prefix for non-weather threshold markets too (confirmed:
+    # KXHIGHINFLATION, KXLOW-26NOVCOMP), so no string-matching fix
+    # distinguishes them; that's what the real rules-text measure
+    # classification downstream is already for, and it correctly handles
+    # it — a non-weather market gets measure="other" and is skipped
+    # before ever reaching orderbook fetching or a trading decision.
     discovery_keywords: tuple = tuple(
-        k.strip() for k in os.getenv("DISCOVERY_KEYWORDS", "rain,KXHIGH,KXLOW").split(",") if k.strip()
+        k.strip() for k in os.getenv("DISCOVERY_KEYWORDS", "KXRAIN,KXHIGH,KXLOW").split(",") if k.strip()
     )
     discovery_refresh_seconds: int = _int("DISCOVERY_REFRESH_SECONDS", 3600)  # re-check hourly
     advisor_interval_seconds: int = _int("ADVISOR_INTERVAL_SECONDS", 7 * 24 * 3600)  # weekly by default
