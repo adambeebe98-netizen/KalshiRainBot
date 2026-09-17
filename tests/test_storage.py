@@ -773,5 +773,33 @@ class TestRecentStrategyPerformance(unittest.TestCase):
         self.assertEqual(perf["trades"], 0)
 
 
+class TestHistoricalMarketSettlementSourceFields(unittest.TestCase):
+    """settlement_source, threshold_description, and confidence were
+    extracted by rules_extractor all along but discarded rather than
+    stored -- added per explicit request, going forward only (not
+    backfilled onto already-processed markets)."""
+
+    def setUp(self):
+        storage.init_db()
+
+    def test_all_three_new_fields_save_and_load_correctly(self):
+        storage.save_historical_market(
+            "T1", station_code="CLINYC", measure="temperature_high",
+            threshold_low_f=96.0001, settlement_source="NWS",
+            threshold_description="strictly greater than 96F", confidence="high",
+        )
+        market = storage.get_historical_market("T1")
+        self.assertEqual(market["settlement_source"], "NWS")
+        self.assertEqual(market["threshold_description"], "strictly greater than 96F")
+        self.assertEqual(market["confidence"], "high")
+
+    def test_omitting_the_new_fields_defaults_to_none_not_an_error(self):
+        storage.save_historical_market("T2", station_code="CLIAUS", measure="temperature_high")
+        market = storage.get_historical_market("T2")
+        self.assertIsNone(market["settlement_source"])
+        self.assertIsNone(market["threshold_description"])
+        self.assertIsNone(market["confidence"])
+
+
 if __name__ == "__main__":
     unittest.main()
