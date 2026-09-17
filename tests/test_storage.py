@@ -834,8 +834,8 @@ class TestHistoricalPriceAndWeatherUniqueness(unittest.TestCase):
         self.assertIn("UNIQUE", idx[0].upper())
 
     def test_reinserting_the_same_price_point_is_silently_ignored(self):
-        storage.save_historical_price_points("T1", [(1000, 50, 10)])
-        storage.save_historical_price_points("T1", [(1000, 999, 999)])  # same key, different values
+        storage.save_historical_price_points("T1", [(1000, 50, 10, 48, 52, 100)])
+        storage.save_historical_price_points("T1", [(1000, 999, 999, 999, 999, 999)])  # same key, different values
         with storage.get_conn() as conn:
             rows = conn.execute(
                 "SELECT yes_price_cents, volume FROM historical_price_points WHERE ticker='T1' AND ts=1000"
@@ -890,6 +890,33 @@ class TestHistoricalPriceAndWeatherUniqueness(unittest.TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+
+class TestExpirationValueAndBidAskOpenInterest(unittest.TestCase):
+    """expiration_value (Kalshi's real settlement value) and per-hour
+    bid/ask/open_interest were already present in data being fetched
+    every time, previously discarded. expiration_value enables checking
+    reconstructed weather data against real ground truth at scale;
+    bid/ask spread and open interest are liquidity signals directly
+    relevant to swing-trading pattern analysis, not just calibration."""
+
+    def setUp(self):
+        storage.init_db()
+
+    def test_expiration_value_saves_and_loads_correctly(self):
+        storage.save_historical_market("T1", station_code="CLIAUS", measure="temperature_high",
+                                          expiration_value=97.0)
+        market = storage.get_historical_market("T1")
+        self.assertEqual(market["expiration_value"], 97.0)
+
+    def test_bid_ask_open_interest_save_and_load_correctly_and_stay_distinct(self):
+        storage.save_historical_price_points("T2", [(1000, 45, 10, 43, 46, 250)])
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT yes_price_cents, volume, yes_bid_cents, yes_ask_cents, open_interest "
+                "FROM historical_price_points WHERE ticker='T2' AND ts=1000"
+            ).fetchone()
+        self.assertEqual(row, (45, 10, 43, 46, 250))
 
 
 if __name__ == "__main__":
