@@ -119,6 +119,54 @@ class TestBackfillWeatherForStation(unittest.TestCase):
                                   "WHERE station_code='KAUS' ORDER BY ts").fetchall()
         self.assertEqual(len(rows), 2, "both distinct timestamps should be saved, not merged away")
 
+    def test_translates_kalshi_raw_station_code_before_the_station_reference_lookup(self):
+        """CONFIRMED REAL BUG, caught on a live backfill run: every single
+        station failed with "no coordinates known" because this function
+        was looking up STATION_REFERENCE directly by the raw "CLI" code
+        (e.g. "CLIAUS"), which is never a key in that table --
+        STATION_REFERENCE is keyed by the real ICAO code ("KAUS"). This
+        test reproduces the exact confirmed-failing stations from that
+        run directly, with NOTHING mocked between the raw code and the
+        real kalshi_station_to_nws_id + STATION_REFERENCE lookup, since
+        the original bug slipped through specifically because other
+        tests mock backfill_weather_for_station itself and never
+        exercise this real interaction."""
+        for raw_code in ["CLISFO", "CLISEA", "CLIAUS", "CLIPHX", "CLIDEN"]:
+            with self.subTest(raw_code=raw_code):
+                with patch("historical_weather.get_historical_forecast_hourly") as mock_forecast, \
+                     patch("historical_weather.get_historical_observation_hourly") as mock_obs:
+                    mock_forecast.return_value = [
+                        HistoricalHourlyPoint(timestamp="2024-07-15T00:00", temperature_f=85.0,
+                                                precipitation_mm=0.0, precipitation_probability_pct=10.0),
+                    ]
+                    mock_obs.return_value = [
+                        HistoricalHourlyPoint(timestamp="2024-07-15T00:00", temperature_f=84.0, precipitation_mm=0.0),
+                    ]
+                    result = hb.backfill_weather_for_station(raw_code, 1000, 2000)
+                self.assertTrue(result, f"{raw_code} should resolve via translation, matching the live confirmed fix")
+
+    def test_weather_points_are_stored_under_the_raw_code_not_the_translated_one(self):
+        """Deliberate design choice, not an oversight: historical_markets
+        stores the RAW code (matching what the live bot itself stores in
+        market_snapshots/trades), so historical_weather_points must use
+        the same raw form as its key, or a future join between the two
+        tables would never match."""
+        with patch("historical_weather.get_historical_forecast_hourly") as mock_forecast, \
+             patch("historical_weather.get_historical_observation_hourly") as mock_obs:
+            mock_forecast.return_value = [
+                HistoricalHourlyPoint(timestamp="2024-07-15T00:00", temperature_f=85.0, precipitation_mm=0.0),
+            ]
+            mock_obs.return_value = [
+                HistoricalHourlyPoint(timestamp="2024-07-15T00:00", temperature_f=84.0, precipitation_mm=0.0),
+            ]
+            hb.backfill_weather_for_station("CLIAUS", 1000, 2000)
+
+        with storage.get_conn() as conn:
+            raw_row = conn.execute("SELECT COUNT(*) FROM historical_weather_points WHERE station_code='CLIAUS'").fetchone()
+            translated_row = conn.execute("SELECT COUNT(*) FROM historical_weather_points WHERE station_code='KAUS'").fetchone()
+        self.assertEqual(raw_row[0], 1)
+        self.assertEqual(translated_row[0], 0)
+
 
 class TestBackfillOneMarket(unittest.TestCase):
     def setUp(self):
