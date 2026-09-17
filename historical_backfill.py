@@ -230,37 +230,57 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
     return True
 
 
+_MAX_REMEMBERED_TEMPLATES = 8  # small cap -- a series realistically has a
+# handful of genuinely distinct wordings at most (e.g. separate phrasing
+# for single-threshold "T" tickers vs bracket "B" tickers, or an older
+# wording era), never dozens.
+
+
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
                           series_ticker: str, candlestick_interval: int = 60,
-                          template: SeriesTemplate | None = None) -> SeriesTemplate | None:
+                          templates: list[SeriesTemplate] | None = None) -> list[SeriesTemplate]:
     """
     Backfills everything for one already-settled market: rules
     extraction, price history, and (if not already covered) its
     station's weather. Any single failure here should be caught by the
     caller and logged, not allowed to abort the whole series.
 
-    template, when provided, is tried FIRST -- Adam's insight, confirmed
-    correct: within one series, every market's rules text is the same
-    template with only the date and threshold substituted, so calling
-    the LLM separately for every single market (confirmed live: 3,700+
-    distinct tickers for Austin alone) was wasteful past the first one.
-    A full LLM extraction only happens when no template exists yet, or
-    the current one doesn't cleanly apply to this specific market's text
-    (see series_template.py for why that's provably safe rather than a
-    guess). Returns the (possibly newly-learned) template so the caller
-    can reuse it for the series' next market.
+    templates holds every distinct wording template already learned for
+    this series (not just the most recent one) -- CONFIRMED LIVE: a
+    single-slot version of this initially caused Chicago's throughput to
+    drop to ~35 markets/minute versus Austin's ~200/minute, and directly
+    checking the LLM cache's growth rate confirmed why: roughly a third
+    of Chicago's markets were still triggering a fresh LLM call, most
+    likely because two genuinely different wordings (single-threshold
+    "T" tickers vs bracket "B" tickers) are interleaved throughout its
+    history, causing a single remembered template to be repeatedly
+    forgotten and relearned every time the wording switched. Each
+    template already-learned for this series is tried in turn; a full
+    LLM extraction (and a new template added to the list) only happens
+    when NONE of them cleanly apply to this specific market's text (see
+    series_template.py for why a match is provably safe, not a guess).
+    Returns the list, so the caller can pass it into the next market.
     """
+    if templates is None:
+        templates = []
+
     ticker = market_obj["ticker"]
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
-    rules = try_apply_template(template, rules_text, ticker) if template is not None else None
+    rules = None
+    for tmpl in templates:
+        rules = try_apply_template(tmpl, rules_text, ticker)
+        if rules is not None:
+            break
 
     if rules is None:
         rules = extractor.extract(ticker, rules_text)
         rules.station_code = apply_station_override(series_ticker, rules.station_code)
         new_template = build_template(rules_text, rules, market_obj.get("occurrence_datetime"))
         if new_template is not None:
-            template = new_template
+            templates.append(new_template)
+            if len(templates) > _MAX_REMEMBERED_TEMPLATES:
+                templates.pop(0)  # evict the oldest, keep the cap small
 
     open_time = market_obj.get("open_time")
     close_time = market_obj.get("close_time")
@@ -277,7 +297,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     end_ts = _parse_iso_to_unix(close_time)
     if start_ts is None or end_ts is None:
         log.warning(f"{ticker}: missing/malformed open_time or close_time — skipping price/weather backfill")
-        return template
+        return templates
 
     candlestick_data = kalshi.get_historical_candlesticks(
         series_ticker, ticker, start_ts, end_ts, period_interval=candlestick_interval
@@ -292,7 +312,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     if rules.station_code:
         backfill_weather_for_station(rules.station_code, start_ts, end_ts)
 
-    return template
+    return templates
 
 
 def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_ticker: str,
@@ -326,7 +346,7 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
     failed = 0
     skipped_too_old = 0
     cursor = None
-    template: SeriesTemplate | None = None  # learned from the first market, reused for the rest of this series
+    templates: list[SeriesTemplate] = []  # every distinct wording template learned so far this series
 
     while True:
         page = kalshi.get_historical_markets(series_ticker=series_ticker, cursor=cursor)
@@ -344,8 +364,8 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
             page_has_any_in_range = True
 
             try:
-                template = backfill_one_market(kalshi, extractor, market_obj, series_ticker,
-                                                 candlestick_interval, template)
+                templates = backfill_one_market(kalshi, extractor, market_obj, series_ticker,
+                                                   candlestick_interval, templates)
                 processed += 1
             except Exception as e:
                 log.warning(f"Failed to backfill {ticker}: {e}")
