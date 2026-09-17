@@ -34,7 +34,7 @@ import historical_weather
 import storage
 from kalshi_client import KalshiClient
 from rules_extractor import RulesExtractor
-from weather_data import STATION_REFERENCE
+from weather_data import STATION_REFERENCE, kalshi_station_to_nws_id
 
 log = logging.getLogger("historical_backfill")
 
@@ -99,13 +99,32 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
     False if this station+range was already covered (see
     has_historical_weather_for_station) or coordinates aren't known for
     this station.
+
+    station_code is Kalshi's own "CLI"-prefixed settlement-source format
+    (e.g. "CLIAUS"), the SAME format historical_markets.station_code
+    stores it in (matching what the live bot itself stores in
+    market_snapshots/trades — see bot.py's own storage calls, which also
+    store the raw code, translating only internally for the actual
+    weather.gov lookup). CONFIRMED REAL BUG, caught on a live backfill
+    run: every single station failed with "no coordinates known" because
+    this function was looking up STATION_REFERENCE directly by the raw
+    "CLI" code, which is never a key in that table — STATION_REFERENCE is
+    keyed by the real ICAO code ("KAUS"), exactly the translation
+    kalshi_station_to_nws_id exists for. The raw code is still what gets
+    used as this function's OWN storage key (has_historical_weather_for_station /
+    save_historical_weather_points), specifically so it stays joinable
+    against historical_markets.station_code, which stores the same raw
+    form — only the STATION_REFERENCE lookup and the actual Open-Meteo
+    coordinates need the translated ICAO code.
     """
     if storage.has_historical_weather_for_station(station_code, start_ts, end_ts):
         return False
 
-    ref = STATION_REFERENCE.get(station_code)
+    nws_station = kalshi_station_to_nws_id(station_code)
+    ref = STATION_REFERENCE.get(nws_station)
     if not ref:
-        log.warning(f"No coordinates known for station {station_code} — skipping weather backfill")
+        log.warning(f"No coordinates known for station {station_code} "
+                    f"(translated: {nws_station}) — skipping weather backfill")
         return False
 
     start_date = datetime.fromtimestamp(start_ts, tz=timezone.utc).date()
