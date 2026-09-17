@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import logging
 from datetime import datetime, timezone
 from contextlib import contextmanager
 
 from config import SETTINGS
 from categories import category_for, MIN_SAMPLE_SIZE
+
+log = logging.getLogger("storage")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -437,10 +440,55 @@ def get_conn():
         conn.close()
 
 
+def _migrate_add_unique_constraints(conn) -> None:
+    """
+    Upgrades historical_price_points and historical_weather_points from
+    a plain (non-unique) index to a real UNIQUE constraint on their
+    natural key -- CONFIRMED-NEEDED: unlike historical_markets (which
+    has always had a true PRIMARY KEY on ticker), these two only ever
+    had id INTEGER PRIMARY KEY AUTOINCREMENT as their key, with the
+    (ticker, ts) / (station_code, ts) index existing for query speed
+    only, not uniqueness -- meaning nothing in the database itself ever
+    prevented a market or station+hour from being inserted twice.
+    Reprocessing the same ticker before the application-level "already
+    stored, skip" guard existed (which happened tonight, across several
+    restarts) could have inserted duplicate rows with no error at all.
+
+    Making this a real UNIQUE index, and switching both save_* functions
+    to INSERT OR IGNORE, moves this guarantee to the database itself:
+    correct even if a future code change ever reintroduces a
+    reprocessing bug, not dependent on that one Python-level check
+    always being present and correct.
+
+    Deliberately best-effort and non-fatal: if duplicate rows already
+    exist on some pre-existing database when this runs, building a
+    UNIQUE index over them fails with an IntegrityError -- caught and
+    logged here rather than raised, since this must never be able to
+    break init_db() (which the live trading bot calls on every startup).
+    A database in that state keeps working on the old, non-unique index;
+    the caller sees a clear log line naming which table still has
+    duplicates left to clean up before this protection can take effect.
+    """
+    for old_index_name, table, key_cols in (
+        ("idx_historical_price_points_ticker_ts", "historical_price_points", "ticker, ts"),
+        ("idx_historical_weather_points_station_ts", "historical_weather_points", "station_code, ts"),
+    ):
+        try:
+            conn.execute(f"DROP INDEX IF EXISTS {old_index_name}")
+            conn.execute(f"CREATE UNIQUE INDEX {old_index_name} ON {table}({key_cols})")
+        except sqlite3.IntegrityError:
+            log.warning(f"{table} already has duplicate ({key_cols}) rows — "
+                        f"could not add a UNIQUE constraint. Falling back to a "
+                        f"plain (non-unique) index so queries stay fast; "
+                        f"existing duplicates should be cleaned up manually.")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {old_index_name} ON {table}({key_cols})")
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
         _migrate_add_columns(conn)
+        _migrate_add_unique_constraints(conn)
 
 
 def log_decision(ticker: str, side: str, market_price_cents: int, model_probability: float,
@@ -1516,7 +1564,7 @@ def save_historical_price_points(ticker: str, points: list[tuple[int, int | None
         return
     with get_conn() as conn:
         conn.executemany(
-            "INSERT INTO historical_price_points (ticker, ts, yes_price_cents, volume) VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO historical_price_points (ticker, ts, yes_price_cents, volume) VALUES (?,?,?,?)",
             [(ticker, ts, price, vol) for ts, price, vol in points],
         )
 
@@ -1529,7 +1577,7 @@ def save_historical_weather_points(station_code: str,
         return
     with get_conn() as conn:
         conn.executemany(
-            "INSERT INTO historical_weather_points "
+            "INSERT OR IGNORE INTO historical_weather_points "
             "(station_code, ts, forecast_temp_f, forecast_precip_pop_pct, observed_temp_f, observed_precip_mm) "
             "VALUES (?,?,?,?,?,?)",
             [(station_code, ts, ftemp, fpop, otemp, oprecip) for ts, ftemp, fpop, otemp, oprecip in points],
