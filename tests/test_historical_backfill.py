@@ -204,12 +204,12 @@ class TestBackfillOneMarket(unittest.TestCase):
         }
 
         with patch.object(hb, "backfill_weather_for_station") as mock_weather:
-            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHNY")
+            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHTEST")
 
         market = storage.get_historical_market("KXHIGHNY-24JUL15-T90")
         self.assertEqual(market["station_code"], "KAUS")
         self.assertEqual(market["result"], "yes")
-        self.assertEqual(market["series_ticker"], "KXHIGHNY")
+        self.assertEqual(market["series_ticker"], "KXHIGHTEST")
 
         with storage.get_conn() as conn:
             price_rows = conn.execute(
@@ -228,7 +228,7 @@ class TestBackfillOneMarket(unittest.TestCase):
         market_obj = {"ticker": "T2", "open_time": "2024-07-14T00:00:00Z", "close_time": None, "result": "no"}
 
         with patch.object(hb, "backfill_weather_for_station") as mock_weather:
-            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHNY")
+            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHTEST")
 
         market = storage.get_historical_market("T2")
         self.assertIsNotNone(market, "the market itself should still be saved even without a usable close_time")
@@ -246,7 +246,7 @@ class TestBackfillOneMarket(unittest.TestCase):
                        "close_time": "2024-07-15T00:00:00Z", "result": "yes"}
 
         with patch.object(hb, "backfill_weather_for_station") as mock_weather:
-            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHNY")
+            hb.backfill_one_market(kalshi, extractor, market_obj, series_ticker="KXHIGHTEST")
 
         mock_weather.assert_not_called()
 
@@ -325,6 +325,34 @@ class TestBackfillSeries(unittest.TestCase):
 
         result = hb.backfill_series(kalshi, extractor, "KXHIGHNY")
         self.assertEqual(result, {"processed": 0, "failed": 0})
+
+
+class TestApplyStationOverride(unittest.TestCase):
+    """CONFIRMED LIVE via a real backfill run: rules_extractor's LLM
+    hallucinated two different wrong station codes for Austin markets
+    within the same series (CLIAIS, then CLIAYC — neither is CLIAUS),
+    and separately produced CLIPHO for Phoenix (should be CLIPHX). These
+    are the exact real failures this override was built to fix."""
+
+    def test_corrects_the_confirmed_austin_failures(self):
+        self.assertEqual(hb.apply_station_override("KXHIGHAUS", "CLIAIS"), "CLIAUS")
+        self.assertEqual(hb.apply_station_override("KXHIGHAUS", "CLIAYC"), "CLIAUS")
+
+    def test_corrects_the_confirmed_phoenix_failure(self):
+        self.assertEqual(hb.apply_station_override("KXHIGHTPHX", "CLIPHO"), "CLIPHX")
+
+    def test_matching_extraction_is_left_unchanged(self):
+        self.assertEqual(hb.apply_station_override("KXHIGHCHI", "CLIMDW"), "CLIMDW")
+
+    def test_series_not_in_the_table_passes_through_unchanged(self):
+        self.assertEqual(hb.apply_station_override("KXHIGHTVABB", "CLIVABB"), "CLIVABB")
+        self.assertIsNone(hb.apply_station_override("KXHIGHTVABB", None))
+
+    def test_rotating_city_series_are_excluded_from_the_table(self):
+        """A series-level override would be actively wrong for these --
+        the station genuinely differs market to market within one series."""
+        self.assertNotIn("KXRAIN", hb.CONFIRMED_SERIES_STATION_OVERRIDES)
+        self.assertNotIn("KXRAINWKND", hb.CONFIRMED_SERIES_STATION_OVERRIDES)
 
 
 if __name__ == "__main__":
