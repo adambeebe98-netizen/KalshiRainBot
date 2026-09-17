@@ -272,7 +272,7 @@ class TestBackfillSeries(unittest.TestCase):
         with patch.object(hb, "time") as mock_time:  # skip real sleeps in the test
             result = hb.backfill_series(kalshi, extractor, "KXHIGHNY")
 
-        self.assertEqual(result, {"processed": 2, "failed": 0})
+        self.assertEqual(result, {"processed": 2, "failed": 0, "skipped_too_old": 0})
         self.assertEqual(kalshi.get_historical_markets.call_count, 2)
 
     def test_one_markets_failure_does_not_abort_the_series(self):
@@ -297,7 +297,7 @@ class TestBackfillSeries(unittest.TestCase):
         with patch.object(hb, "time"):
             result = hb.backfill_series(kalshi, extractor, "KXHIGHNY")
 
-        self.assertEqual(result, {"processed": 1, "failed": 1})
+        self.assertEqual(result, {"processed": 1, "failed": 1, "skipped_too_old": 0})
         self.assertIsNotNone(storage.get_historical_market("GOOD"))
 
     def test_max_markets_stops_early(self):
@@ -324,7 +324,7 @@ class TestBackfillSeries(unittest.TestCase):
         extractor = MagicMock()
 
         result = hb.backfill_series(kalshi, extractor, "KXHIGHNY")
-        self.assertEqual(result, {"processed": 0, "failed": 0})
+        self.assertEqual(result, {"processed": 0, "failed": 0, "skipped_too_old": 0})
 
 
 class TestApplyStationOverride(unittest.TestCase):
@@ -353,6 +353,94 @@ class TestApplyStationOverride(unittest.TestCase):
         the station genuinely differs market to market within one series."""
         self.assertNotIn("KXRAIN", hb.CONFIRMED_SERIES_STATION_OVERRIDES)
         self.assertNotIn("KXRAINWKND", hb.CONFIRMED_SERIES_STATION_OVERRIDES)
+
+
+class TestBackfillSeriesMinOpenTimeCutoff(unittest.TestCase):
+    """CONFIRMED LIVE: Kalshi's own weather-market history for at least
+    one series extends nearly 2 years back -- far more than needed for
+    calibration and likely spanning market regimes with very different
+    liquidity than today's. min_open_time bounds this."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM historical_markets")
+            conn.commit()
+
+    def _make_extractor(self):
+        extractor = MagicMock()
+        extractor.extract.return_value = MagicMock(station_code=None, measure="temperature_high",
+                                                       threshold_low_f=None, threshold_high_f=None)
+        return extractor
+
+    def test_markets_older_than_cutoff_are_skipped_not_stored(self):
+        kalshi = MagicMock()
+        kalshi.get_historical_markets.return_value = {
+            "markets": [
+                {"ticker": "NEW1", "open_time": "2026-06-01T00:00:00Z", "close_time": None, "result": "yes"},
+                {"ticker": "OLD1", "open_time": "2024-01-01T00:00:00Z", "close_time": None, "result": "yes"},
+            ],
+            "cursor": "",
+        }
+        kalshi.get_historical_market_rules_text.return_value = ""
+
+        with patch.object(hb, "time"):
+            result = hb.backfill_series(kalshi, self._make_extractor(), "T",
+                                          min_open_time="2025-03-17T00:00:00Z")
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["skipped_too_old"], 1)
+        self.assertIsNotNone(storage.get_historical_market("NEW1"))
+        self.assertIsNone(storage.get_historical_market("OLD1"), "an old market should never be stored at all")
+
+    def test_pagination_stops_once_an_entire_page_is_past_cutoff(self):
+        kalshi = MagicMock()
+        kalshi.get_historical_markets.side_effect = [
+            {"markets": [{"ticker": "A", "open_time": "2026-01-01T00:00:00Z", "close_time": None, "result": "yes"}],
+             "cursor": "page2"},
+            {"markets": [{"ticker": "B", "open_time": "2020-01-01T00:00:00Z", "close_time": None, "result": "yes"}],
+             "cursor": "page3"},
+        ]
+        kalshi.get_historical_market_rules_text.return_value = ""
+
+        with patch.object(hb, "time"):
+            hb.backfill_series(kalshi, self._make_extractor(), "T", min_open_time="2025-03-17T00:00:00Z")
+
+        self.assertEqual(kalshi.get_historical_markets.call_count, 2,
+                          "should stop after the first entirely-old page, never fetching a third")
+
+    def test_locally_jumbled_page_does_not_trigger_early_stop(self):
+        """Real pagination has been observed to NOT be in strict date
+        order within a page (an Apr-08 market appearing between Apr-27
+        and Apr-26 entries in a real run) -- a single old market must
+        not stop the whole series if the same page also has an in-range
+        market."""
+        kalshi = MagicMock()
+        kalshi.get_historical_markets.return_value = {
+            "markets": [
+                {"ticker": "MIXED_OLD", "open_time": "2020-01-01T00:00:00Z", "close_time": None, "result": "yes"},
+                {"ticker": "MIXED_NEW", "open_time": "2026-01-01T00:00:00Z", "close_time": None, "result": "yes"},
+            ],
+            "cursor": "",
+        }
+        kalshi.get_historical_market_rules_text.return_value = ""
+
+        with patch.object(hb, "time"):
+            result = hb.backfill_series(kalshi, self._make_extractor(), "T", min_open_time="2025-03-17T00:00:00Z")
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["skipped_too_old"], 1)
+
+    def test_no_min_open_time_is_backward_compatible(self):
+        kalshi = MagicMock()
+        kalshi.get_historical_markets.return_value = {
+            "markets": [{"ticker": "T", "open_time": "2020-01-01T00:00:00Z", "close_time": None, "result": "yes"}],
+            "cursor": "",
+        }
+        kalshi.get_historical_market_rules_text.return_value = ""
+        with patch.object(hb, "time"):
+            result = hb.backfill_series(kalshi, self._make_extractor(), "T")
+        self.assertEqual(result, {"processed": 1, "failed": 0, "skipped_too_old": 0})
 
 
 if __name__ == "__main__":
