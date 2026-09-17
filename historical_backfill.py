@@ -275,15 +275,35 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
 
 
 def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_ticker: str,
-                      max_markets: int | None = None, candlestick_interval: int = 60) -> dict:
+                      max_markets: int | None = None, candlestick_interval: int = 60,
+                      min_open_time: str | None = None) -> dict:
     """
     Pages through every settled market in one series and backfills each.
     Returns a summary dict — {"processed": N, "failed": N} — rather than
     raising, since a partial backfill (most markets succeeded, a few
     failed) is still a genuinely useful result, not something to discard.
+
+    min_open_time (ISO 8601, e.g. "2025-03-17T00:00:00Z") bounds how far
+    back this goes. CONFIRMED LIVE: Kalshi's own weather-market history
+    for at least one series (KXHIGHAUS) extends nearly 2 years back —
+    far older than the market's current liquidity/structure likely
+    resembles, and far more than needed for either calibration (which
+    doesn't need years of samples per city) or swing-trading pattern
+    work (where an old, thinner market regime may not transfer to
+    today's). Markets older than this are skipped individually rather
+    than aborting the whole series — safer than trusting strict date
+    ordering within a single page, since observed real pagination
+    shows LOCAL date jumbling (e.g. an Apr-08 market appearing between
+    Apr-27 and Apr-26 entries). Pagination itself only stops once an
+    ENTIRE page (not a single market) comes back past the cutoff --
+    confirmed live that pagination moves in a consistent overall
+    direction (newest to oldest) even with that local jumbling, so a
+    whole page past cutoff is a reliable stop signal without assuming
+    perfect per-market ordering.
     """
     processed = 0
     failed = 0
+    skipped_too_old = 0
     cursor = None
 
     while True:
@@ -292,8 +312,15 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
         if not markets:
             break
 
+        page_has_any_in_range = False
         for market_obj in markets:
             ticker = market_obj.get("ticker", "<unknown>")
+
+            if min_open_time and (market_obj.get("open_time") or "") < min_open_time:
+                skipped_too_old += 1
+                continue
+            page_has_any_in_range = True
+
             try:
                 backfill_one_market(kalshi, extractor, market_obj, series_ticker, candlestick_interval)
                 processed += 1
@@ -301,12 +328,16 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
                 log.warning(f"Failed to backfill {ticker}: {e}")
                 failed += 1
             if max_markets and (processed + failed) >= max_markets:
-                return {"processed": processed, "failed": failed}
+                return {"processed": processed, "failed": failed, "skipped_too_old": skipped_too_old}
             time.sleep(_PER_MARKET_DELAY_SECONDS)
+
+        if min_open_time and not page_has_any_in_range:
+            log.info(f"{series_ticker}: entire page past min_open_time cutoff, stopping pagination early")
+            break
 
         cursor = page.get("cursor")
         if not cursor:
             break
         time.sleep(_PAGE_DELAY_SECONDS)
 
-    return {"processed": processed, "failed": failed}
+    return {"processed": processed, "failed": failed, "skipped_too_old": skipped_too_old}
