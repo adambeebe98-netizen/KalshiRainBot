@@ -661,5 +661,52 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         self.assertEqual(stored_b2["threshold_high_f"], 84.0)
 
 
+class TestExpirationValueAndBidAskIntegration(unittest.TestCase):
+    """expiration_value, bid/ask, and open_interest were already present
+    in data fetched every time, previously discarded -- confirmed
+    end-to-end through the real backfill_one_market path, not just at
+    the storage layer in isolation."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM historical_markets")
+            conn.execute("DELETE FROM historical_price_points")
+            conn.commit()
+
+    def test_all_three_flow_through_the_real_backfill_path(self):
+        from rules_extractor import MarketRules
+
+        kalshi = MagicMock()
+        kalshi.get_historical_market_rules_text.return_value = "If the high temp for Sep 17, 2026 is greater than 95, resolves Yes."
+        kalshi.get_historical_candlesticks.return_value = {
+            "candlesticks": [
+                {"end_period_ts": 1000, "price": {"close": "0.4500"}, "yes_bid": {"close": "0.4300"},
+                 "yes_ask": {"close": "0.4600"}, "volume": "10.00", "open_interest": "250.00"},
+            ]
+        }
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="T1", station_code="CLIAUS", settlement_source="NWS", measure="temperature_high",
+            threshold_description="strictly greater than 95F", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=95.0001, threshold_high_f=None,
+        )
+        market_obj = {"ticker": "T1", "open_time": "2026-09-16T00:00:00Z", "close_time": "2026-09-18T00:00:00Z",
+                       "occurrence_datetime": "2026-09-17T00:00:00Z", "result": "yes", "expiration_value": "97.00"}
+
+        with patch.object(hb, "backfill_weather_for_station"):
+            hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS")
+
+        market = storage.get_historical_market("T1")
+        self.assertEqual(market["expiration_value"], 97.0)
+
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT yes_price_cents, yes_bid_cents, yes_ask_cents, open_interest, volume "
+                "FROM historical_price_points WHERE ticker='T1' AND ts=1000"
+            ).fetchone()
+        self.assertEqual(row, (45, 43, 46, 250, 10))
+
+
 if __name__ == "__main__":
     unittest.main()
