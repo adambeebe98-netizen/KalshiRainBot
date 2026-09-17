@@ -289,7 +289,7 @@ _MAX_REMEMBERED_TEMPLATES = 20  # CONFIRMED LIVE: Chicago alone genuinely has
 
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
                           series_ticker: str, candlestick_interval: int = 60,
-                          templates: list[SeriesTemplate] | None = None) -> list[SeriesTemplate]:
+                          templates: list[SeriesTemplate] | None = None) -> tuple[list[SeriesTemplate], bool]:
     """
     Backfills everything for one already-settled market: rules
     extraction, price history, and (if not already covered) its
@@ -310,7 +310,20 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     LLM extraction (and a new template added to the list) only happens
     when NONE of them cleanly apply to this specific market's text (see
     series_template.py for why a match is provably safe, not a guess).
-    Returns the list, so the caller can pass it into the next market.
+    Returns (templates, was_skip): templates so the caller can pass it
+    into the next market. was_skip is True only for the cheap,
+    already-stored path below (a local DB lookup plus a usually-cheap
+    weather re-check, no real rate-limited API calls at all) --
+    CONFIRMED LIVE: the caller's own per-market delay used to fire
+    unconditionally after every market regardless of this, meaning
+    re-skipping through tens of thousands of already-done markets on
+    a restart could take over an hour in sleep delays ALONE before
+    reaching genuinely new work -- and a watchdog restarting the
+    service after 5 minutes of no visible progress kept killing it
+    mid-catch-up, over and over, forever, without ever actually
+    reaching new markets again. was_skip lets the caller apply that
+    delay only when a real, rate-limited external call actually
+    happened.
 
     settlement_source and confidence are series-wide constants so they
     stay accurate under template reuse. threshold_description does NOT
@@ -350,7 +363,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
         end_ts = _parse_iso_to_unix(close_time)
         if station and start_ts is not None and end_ts is not None:
             backfill_weather_for_station(station, start_ts, end_ts)
-        return templates
+        return templates, True
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
     rules = None
@@ -401,7 +414,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     end_ts = _parse_iso_to_unix(close_time)
     if start_ts is None or end_ts is None:
         log.warning(f"{ticker}: missing/malformed open_time or close_time — skipping price/weather backfill")
-        return templates
+        return templates, False
 
     candlestick_data = kalshi.get_historical_candlesticks(
         series_ticker, ticker, start_ts, end_ts, period_interval=candlestick_interval
@@ -419,7 +432,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
     if rules.station_code:
         backfill_weather_for_station(rules.station_code, start_ts, end_ts)
 
-    return templates
+    return templates, False
 
 
 def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_ticker: str,
@@ -471,15 +484,27 @@ def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_tick
             page_has_any_in_range = True
 
             try:
-                templates = backfill_one_market(kalshi, extractor, market_obj, series_ticker,
+                templates, was_skip = backfill_one_market(kalshi, extractor, market_obj, series_ticker,
                                                    candlestick_interval, templates)
                 processed += 1
             except Exception as e:
                 log.warning(f"Failed to backfill {ticker}: {e}")
                 failed += 1
+                was_skip = False  # a genuine failure -- treat like a real attempt, not a free skip
             if max_markets and (processed + failed) >= max_markets:
                 return {"processed": processed, "failed": failed, "skipped_too_old": skipped_too_old}
-            time.sleep(_PER_MARKET_DELAY_SECONDS)
+            # CONFIRMED LIVE: this delay used to fire unconditionally for
+            # EVERY market, including the cheap, already-stored skip path
+            # (a local DB lookup, no real rate-limited API call at all).
+            # Re-skipping through tens of thousands of already-done
+            # markets on a restart could then take over an hour in sleep
+            # delays alone -- and with a watchdog restarting the service
+            # after 5 minutes of no visible progress, the process never
+            # once survived long enough to finish catching up and reach
+            # genuinely new work again. Only a real attempt (skip or not)
+            # needs rate-limiting; a pure DB lookup does not.
+            if not was_skip:
+                time.sleep(_PER_MARKET_DELAY_SECONDS)
 
         if min_open_time and not page_has_any_in_range:
             log.info(f"{series_ticker}: entire page past min_open_time cutoff, stopping pagination early")
