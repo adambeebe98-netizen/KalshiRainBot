@@ -108,5 +108,54 @@ class TestNoPathDoubling(unittest.TestCase):
         self.assertEqual(captured["url"], "/portfolio/balance")
 
 
+class TestHistoricalEndpoints(unittest.TestCase):
+    """Foundation for retrospective backtesting against years of real
+    weather-market history, not just data collected going forward.
+    Explicitly requested: "if we go back, extract all of that available
+    data that is applicable to the trades." """
+
+    def _capture_request(self, response_json):
+        captured = {}
+
+        def fake_request(self, method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            captured["params"] = kwargs.get("params")
+
+            class FakeResp:
+                status_code = 200
+
+                def json(self):
+                    return response_json
+            return FakeResp()
+        return captured, fake_request
+
+    def test_get_historical_markets_hits_the_bare_historical_path(self):
+        captured, fake_request = self._capture_request({"markets": [], "cursor": ""})
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            kc.get_historical_markets(series_ticker="KXHIGHNY")
+        self.assertEqual(captured["url"], "/historical/markets")
+        self.assertEqual(captured["params"]["series_ticker"], "KXHIGHNY")
+        self.assertEqual(captured["params"]["status"], "settled")
+
+    def test_get_historical_markets_supports_pagination_cursor(self):
+        captured, fake_request = self._capture_request({"markets": [], "cursor": ""})
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            kc.get_historical_markets(cursor="abc123")
+        self.assertEqual(captured["params"]["cursor"], "abc123")
+
+    def test_get_historical_candlesticks_hits_the_bare_historical_path(self):
+        captured, fake_request = self._capture_request({"candlesticks": []})
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            kc.get_historical_candlesticks("KXHIGHNY", "KXHIGHNY-26JUL15-T90", 1000, 2000)
+        self.assertEqual(captured["url"], "/historical/markets/KXHIGHNY-26JUL15-T90/candlesticks")
+        self.assertEqual(captured["params"]["start_ts"], 1000)
+        self.assertEqual(captured["params"]["end_ts"], 2000)
+        self.assertEqual(captured["params"]["period_interval"], 60)
+
+
 if __name__ == "__main__":
     unittest.main()
