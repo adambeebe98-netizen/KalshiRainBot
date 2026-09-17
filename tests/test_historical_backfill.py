@@ -18,6 +18,7 @@ use_temp_db()
 import storage  # noqa: E402
 import historical_backfill as hb  # noqa: E402
 from historical_weather import HistoricalHourlyPoint  # noqa: E402
+from rules_extractor import MarketRules  # noqa: E402
 
 
 class TestExtractCandlestickPriceCents(unittest.TestCase):
@@ -547,7 +548,7 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         templates = None
         with patch.object(hb, "backfill_weather_for_station"):
             for m in markets:
-                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHNY", templates=templates)
+                templates, _ = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHNY", templates=templates)
 
         self.assertEqual(extractor.extract.call_count, 1, "should only call the LLM once, for the first market")
 
@@ -648,7 +649,7 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         templates = None
         with patch.object(hb, "backfill_weather_for_station"):
             for m in markets:
-                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
+                templates, _ = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
 
         self.assertEqual(call_log, ["T1", "B1"], "each wording should only need one real LLM call, ever")
 
@@ -742,7 +743,7 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         templates = None
         with patch.object(hb, "backfill_weather_for_station"):
             for m in markets_list:
-                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
+                templates, _ = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
 
         self.assertEqual(len(call_log), 10, "each of the 10 distinct shapes should only ever need one real LLM call")
         self.assertEqual(len(templates), 10, "all 10 templates should fit comfortably under the raised cap")
@@ -793,6 +794,58 @@ class TestExpirationValueAndBidAskIntegration(unittest.TestCase):
                 "FROM historical_price_points WHERE ticker='T1' AND ts=1000"
             ).fetchone()
         self.assertEqual(row, (45, 43, 46, 250, 10))
+
+
+class TestSkipFlagAvoidsUnnecessaryDelay(unittest.TestCase):
+    """CONFIRMED LIVE, at real scale: the caller's per-market delay used
+    to fire unconditionally after every market, including the cheap,
+    already-stored skip path (a local DB lookup, no real rate-limited
+    API call at all). Re-skipping through tens of thousands of
+    already-done markets on a restart could take over an hour in sleep
+    delays alone -- and with a watchdog restarting the service after
+    5 minutes of no visible progress, the process never once survived
+    long enough to finish catching up and reach genuinely new work
+    again. backfill_one_market now returns (templates, was_skip) so
+    the caller can apply the delay only when a real attempt happened."""
+
+    def setUp(self):
+        storage.init_db()
+
+    def test_a_genuinely_new_market_is_not_marked_as_a_skip(self):
+        kalshi = MagicMock()
+        kalshi.get_historical_market_rules_text.return_value = "some rules text mentioning 50 degrees"
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="T1", station_code="CLIAUS", settlement_source="NWS", measure="temperature_high",
+            threshold_description="x", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=50.0001, threshold_high_f=None,
+        )
+        market_obj = {"ticker": "SKIPFLAGTEST1", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-02T00:00:00Z",
+                       "occurrence_datetime": "2026-01-01T14:00:00Z", "result": "yes"}
+
+        with patch.object(hb, "backfill_weather_for_station"):
+            templates, was_skip = hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS")
+        self.assertFalse(was_skip)
+
+    def test_an_already_stored_market_is_marked_as_a_genuine_skip(self):
+        kalshi = MagicMock()
+        kalshi.get_historical_market_rules_text.return_value = "some rules text mentioning 50 degrees"
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="T1", station_code="CLIAUS", settlement_source="NWS", measure="temperature_high",
+            threshold_description="x", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=50.0001, threshold_high_f=None,
+        )
+        market_obj = {"ticker": "SKIPFLAGTEST2", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-02T00:00:00Z",
+                       "occurrence_datetime": "2026-01-01T14:00:00Z", "result": "yes"}
+
+        with patch.object(hb, "backfill_weather_for_station"):
+            templates, _ = hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS")
+            # Same ticker again -- now genuinely already stored
+            _, was_skip = hb.backfill_one_market(kalshi, extractor, market_obj, "KXHIGHAUS", templates=templates)
+        self.assertTrue(was_skip)
 
 
 if __name__ == "__main__":
