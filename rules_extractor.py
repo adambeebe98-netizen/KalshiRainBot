@@ -29,7 +29,13 @@ prediction market's contract terms. Read the rules text and return ONLY a \
 JSON object (no prose, no markdown fences) with these exact fields:
 
 {
-  "station_code": "<the NWS or airport station code, e.g. KAUS, or null if not stated>",
+  "station_code": "<Kalshi's own settlement-source station identifier, in its \
+CLI+3-letter-city format (e.g. CLIAUS for Austin, CLIHOU for Houston, CLINYC for \
+New York/Central Park) — the rules text usually names a CITY or LOCATION \
+('Central Park, New York', 'Austin-Bergstrom International Airport'), not this \
+literal code, so INFER it from whatever location is stated rather than requiring \
+the code itself to appear verbatim. Only use null if the location genuinely \
+cannot be determined from the text at all.>",
   "settlement_source": "<'NWS' | 'The Weather Company' | 'NOAA CDO' | 'other' | 'unclear'>",
   "measure": "<'precipitation_daily' | 'precipitation_monthly' | 'temperature_high' | 'temperature_low' | 'other'>",
   "threshold_description": "<plain-language threshold, e.g. 'strictly greater than 0 inches' or 'high temperature 85-89F'>",
