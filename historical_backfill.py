@@ -281,10 +281,17 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
     return True
 
 
-_MAX_REMEMBERED_TEMPLATES = 20  # CONFIRMED LIVE: Chicago alone genuinely has
-# 10 distinct wordings across its history -- raised well past that with
-# room to spare for other series with even more variants, while still
-# bounded so a genuinely pathological series can't grow this unboundedly.
+_MAX_REMEMBERED_TEMPLATES = 40  # CONFIRMED LIVE: Chicago has 10 distinct
+# wordings, but that's not the full picture -- CONFIRMED LIVE for both NY
+# and Philadelphia: a series' full rules text can independently vary by
+# BOTH its threshold clause AND a wording-era change ("Daily Climate
+# Report" vs "Climatological Report (Daily)") layered on top, so a
+# series with e.g. 11 genuine threshold shapes across 2 wording eras
+# can need up to ~22 distinct full-text templates -- right at or over
+# a cap of 20, causing continued (milder) eviction and relearning even
+# with LRU. Raised well past the highest confirmed real count, with
+# room to spare, while still bounded so a genuinely pathological
+# series can't grow this unboundedly.
 
 
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
