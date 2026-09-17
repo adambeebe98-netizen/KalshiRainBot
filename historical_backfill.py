@@ -281,10 +281,10 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
     return True
 
 
-_MAX_REMEMBERED_TEMPLATES = 8  # small cap -- a series realistically has a
-# handful of genuinely distinct wordings at most (e.g. separate phrasing
-# for single-threshold "T" tickers vs bracket "B" tickers, or an older
-# wording era), never dozens.
+_MAX_REMEMBERED_TEMPLATES = 20  # CONFIRMED LIVE: Chicago alone genuinely has
+# 10 distinct wordings across its history -- raised well past that with
+# room to spare for other series with even more variants, while still
+# bounded so a genuinely pathological series can't grow this unboundedly.
 
 
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
@@ -354,9 +354,25 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
     rules = None
-    for tmpl in templates:
+    for i, tmpl in enumerate(templates):
         rules = try_apply_template(tmpl, rules_text, ticker)
         if rules is not None:
+            # CONFIRMED LIVE via direct evidence: Chicago's dominant wordings
+            # (300+, 289+, 274+ separately re-cached tickers for its top 3
+            # shapes alone) were being repeatedly re-learned via fresh LLM
+            # calls, even though a correctly-working template should only
+            # ever need to learn each shape ONCE. Root cause: eviction used
+            # to remove templates.pop(0) -- the oldest-ADDED template,
+            # regardless of how often it's actually needed. A frequently-
+            # used template learned early would sit in slot 0 and get
+            # evicted the moment a new, rarer wording showed up, even while
+            # still being the most commonly needed one. Moving a template
+            # to the end on every successful match turns eviction into true
+            # LRU (least-recently-USED, not least-recently-added) -- a
+            # template stays safe from eviction for as long as it keeps
+            # actually being needed, however many rarer ones cycle through.
+            if i != len(templates) - 1:
+                templates.append(templates.pop(i))
             break
 
     if rules is None:
