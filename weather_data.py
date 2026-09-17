@@ -131,6 +131,17 @@ STATION_REFERENCE = {
     # the extraction question. Coordinates verified directly against
     # weather.gov's own station database (WMO id 72506).
     "KNYC": {"name": "New York Central Park", "lat": 40.7790, "lon": -73.9692},
+    # CONFIRMED MISSING LIVE via the historical backfill run: 5 more
+    # real, confirmed weather-market cities (KXRAIN series) with zero
+    # coordinates on file — same failure mode as KNYC above, just
+    # discovered a batch at a time as backfill actually exercised
+    # stations the live bot had never needed a forecast lookup to
+    # succeed for yet. Coordinates verified against Wikipedia/FAA sources.
+    "KPHL": {"name": "Philadelphia Intl", "lat": 39.8719, "lon": -75.2411},
+    "KMSP": {"name": "Minneapolis-St Paul Intl", "lat": 44.8819, "lon": -93.2217},
+    "KMIA": {"name": "Miami Intl", "lat": 25.7932, "lon": -80.2906},
+    "KLAX": {"name": "Los Angeles Intl", "lat": 33.9425, "lon": -118.4080},
+    "KIAH": {"name": "Houston George Bush Intercontinental", "lat": 29.9844, "lon": -95.3414},
 }
 
 
