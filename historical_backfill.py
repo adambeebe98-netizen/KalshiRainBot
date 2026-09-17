@@ -281,17 +281,19 @@ def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) 
     return True
 
 
-_MAX_REMEMBERED_TEMPLATES = 40  # CONFIRMED LIVE: Chicago has 10 distinct
-# wordings, but that's not the full picture -- CONFIRMED LIVE for both NY
-# and Philadelphia: a series' full rules text can independently vary by
-# BOTH its threshold clause AND a wording-era change ("Daily Climate
-# Report" vs "Climatological Report (Daily)") layered on top, so a
-# series with e.g. 11 genuine threshold shapes across 2 wording eras
-# can need up to ~22 distinct full-text templates -- right at or over
-# a cap of 20, causing continued (milder) eviction and relearning even
-# with LRU. Raised well past the highest confirmed real count, with
-# room to spare, while still bounded so a genuinely pathological
-# series can't grow this unboundedly.
+_MAX_REMEMBERED_TEMPLATES = 200  # CONFIRMED LIVE via py-spy --locals directly
+# inspecting the running process: Atlanta's real, live templates list was
+# already full at 40 (a match found at index 39) and still evicting --
+# genuinely more than 40 distinct full-text templates needed across its
+# 2-year history. Root cause: grouping by threshold_description shape
+# (as a diagnostic) undercounts real template count, since two markets
+# sharing the same threshold shape can still need separate templates if
+# ANY other part of the text differs (e.g. two wording eras -- "Daily
+# Climate Report" vs "Climatological Report (Daily)" -- both describe
+# the same threshold but are two distinct real templates). Raised
+# generously rather than guessing at another specific ceiling: the
+# memory cost of a compiled regex object is trivial, so there's no real
+# tradeoff to lowballing this again.
 
 
 def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
