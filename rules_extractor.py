@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict
+import re
+from dataclasses import dataclass, asdict, replace
 from typing import Optional
 
 import anthropic
@@ -58,6 +59,45 @@ Rules text:
 # fields that don't exist / are always null, which would otherwise leave a
 # temperature model doing nothing without any error to notice.
 CACHE_SCHEMA_VERSION = 2
+
+_THRESHOLD_GT_RE = re.compile(r"greater than (\d+(?:\.\d+)?)")
+_THRESHOLD_LT_RE = re.compile(r"less than (\d+(?:\.\d+)?)")
+
+
+def _recover_threshold_from_description(description: str | None) -> tuple[float | None, float | None]:
+    """
+    CONFIRMED LIVE, at real scale: the model sometimes returns a fully
+    correct, parseable threshold_description ("strictly greater than
+    95 degrees Fahrenheit") while independently leaving threshold_low_f
+    and threshold_high_f both null in the very same response -- an
+    internal inconsistency within one extraction, not a wrong answer.
+    First found affecting ~4-5% of markets overall (see
+    repair_null_thresholds.py); confirmed here to spike as high as 66%
+    for one specific series (KXHIGHNY) -- catastrophic for the
+    template system specifically, since build_template needs a real
+    threshold to build from. When the market that would otherwise
+    establish a series' first template hits this, no template is ever
+    saved for that wording; every later market with the identical
+    wording then also needs its own fresh call, and if THAT one also
+    hits the same ~66% failure rate, the pattern perpetuates itself
+    rather than self-correcting after a few calls like a normal new
+    wording would.
+
+    Applying this recovery here, before caching, fixes the problem at
+    its source: the vast majority of these responses now leave with a
+    populated threshold, so build_template gets what it needs on the
+    first try far more often, and the null-threshold data gap barely
+    recurs going forward either.
+    """
+    if not description:
+        return None, None
+    m_gt = _THRESHOLD_GT_RE.search(description)
+    if m_gt:
+        return float(m_gt.group(1)) + 0.0001, None
+    m_lt = _THRESHOLD_LT_RE.search(description)
+    if m_lt:
+        return None, float(m_lt.group(1)) - 0.0001
+    return None, None
 
 
 @dataclass
@@ -131,6 +171,10 @@ class RulesExtractor:
             # own around this step either (see bot.py for its own added
             # guard against exactly this).
             result = MarketRules(ticker=ticker, **parsed)
+            if result.threshold_low_f is None and result.threshold_high_f is None:
+                recovered_low, recovered_high = _recover_threshold_from_description(result.threshold_description)
+                if recovered_low is not None or recovered_high is not None:
+                    result = replace(result, threshold_low_f=recovered_low, threshold_high_f=recovered_high)
         except (json.JSONDecodeError, ValueError, TypeError):
             result = MarketRules(
                 ticker=ticker, station_code=None, settlement_source="unclear", measure="other",
