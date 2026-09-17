@@ -255,6 +255,68 @@ CREATE TABLE IF NOT EXISTS market_outcomes (
     settled_ts INTEGER NOT NULL
 );
 
+-- Historical backfill (see historical_backfill.py) — reconstructs the
+-- same price+weather+outcome picture as market_snapshots/market_outcomes
+-- above, but for YEARS of past markets already settled, instead of
+-- waiting for it to accumulate going forward. Explicitly requested: "if
+-- we go back, extract all of that available data that is applicable to
+-- the trades." Kept structurally SEPARATE from market_snapshots (not
+-- merged into the same table) because the data provenance genuinely
+-- differs: live snapshots use api.weather.gov and Kalshi's live API;
+-- this uses Kalshi's /historical/ endpoints and Open-Meteo (see
+-- historical_weather.py's docstring for why NWS itself has no way to
+-- answer "what was forecast on a past date," and for the real caveat
+-- that Open-Meteo's reconstruction is a different, related model blend
+-- from NWS's own official forecast, not an exact reproduction of it).
+-- Blurring that distinction later would make it impossible to tell which
+-- rows are the ground truth the live bot actually saw versus a
+-- best-available historical approximation.
+CREATE TABLE IF NOT EXISTS historical_markets (
+    ticker TEXT PRIMARY KEY,
+    series_ticker TEXT,
+    event_ticker TEXT,
+    station_code TEXT,
+    measure TEXT,
+    threshold_low_f REAL,
+    threshold_high_f REAL,
+    open_time TEXT,
+    close_time TEXT,
+    result TEXT,              -- 'yes' or 'no', once known
+    backfilled_ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_historical_markets_station ON historical_markets(station_code, measure);
+
+-- Real price history per historical market, from Kalshi's own
+-- candlesticks — one row per candlestick interval, not deduplicated, so
+-- the full price trajectory over a settled market's life is
+-- reconstructable, mirroring market_snapshots' same design choice for
+-- live data.
+CREATE TABLE IF NOT EXISTS historical_price_points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    ts INTEGER NOT NULL,       -- candlestick end timestamp, Unix seconds
+    yes_price_cents INTEGER,   -- candlestick close price
+    volume INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_historical_price_points_ticker_ts ON historical_price_points(ticker, ts);
+
+-- Reconstructed historical weather, keyed by STATION and hour rather
+-- than by individual market — many bracket/threshold markets for the
+-- same city and day share one station, and fetching per-market would
+-- mean fetching (and storing) the identical weather data many times
+-- over. Joined against historical_markets by station_code at analysis
+-- time instead.
+CREATE TABLE IF NOT EXISTS historical_weather_points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_code TEXT NOT NULL,
+    ts INTEGER NOT NULL,               -- Unix seconds, the hour this point represents
+    forecast_temp_f REAL,
+    forecast_precip_pop_pct REAL,
+    observed_temp_f REAL,
+    observed_precip_mm REAL
+);
+CREATE INDEX IF NOT EXISTS idx_historical_weather_points_station_ts ON historical_weather_points(station_code, ts);
+
 -- Human-approved overrides to the heuristic strategies' guessed thresholds
 -- (swing/favorites/longshot — never the calibrated model or arbitrage).
 -- Only ever written by the dashboard's "Apply" button (see web_ui/app.py) —
@@ -1401,6 +1463,76 @@ def record_market_outcome(ticker: str, result: str) -> None:
             "ON CONFLICT(ticker) DO NOTHING",
             (ticker, result, int(time.time())),
         )
+
+
+def save_historical_market(ticker: str, series_ticker: str | None = None,
+                             event_ticker: str | None = None, station_code: str | None = None,
+                             measure: str | None = None, threshold_low_f: float | None = None,
+                             threshold_high_f: float | None = None, open_time: str | None = None,
+                             close_time: str | None = None, result: str | None = None) -> None:
+    """Idempotent by design (INSERT OR REPLACE on the ticker primary key)
+    — the backfill script can safely be re-run over a series it's already
+    partly processed without creating duplicates or needing its own
+    resume-tracking logic."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO historical_markets "
+            "(ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f, "
+            "threshold_high_f, open_time, close_time, result, backfilled_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f,
+             threshold_high_f, open_time, close_time, result, int(time.time())),
+        )
+
+
+def get_historical_market(ticker: str) -> dict | None:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM historical_markets WHERE ticker=?", (ticker,)).fetchone()
+        return dict(row) if row else None
+
+
+def save_historical_price_points(ticker: str, points: list[tuple[int, int | None, int | None]]) -> None:
+    """points: list of (ts, yes_price_cents, volume). Bulk insert — a
+    single historical market's candlesticks can be hundreds of points,
+    and this is called once per market during backfill, not once per
+    point."""
+    if not points:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO historical_price_points (ticker, ts, yes_price_cents, volume) VALUES (?,?,?,?)",
+            [(ticker, ts, price, vol) for ts, price, vol in points],
+        )
+
+
+def save_historical_weather_points(station_code: str,
+                                     points: list[tuple[int, float | None, float | None, float | None, float | None]]) -> None:
+    """points: list of (ts, forecast_temp_f, forecast_precip_pop_pct,
+    observed_temp_f, observed_precip_mm)."""
+    if not points:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO historical_weather_points "
+            "(station_code, ts, forecast_temp_f, forecast_precip_pop_pct, observed_temp_f, observed_precip_mm) "
+            "VALUES (?,?,?,?,?,?)",
+            [(station_code, ts, ftemp, fpop, otemp, oprecip) for ts, ftemp, fpop, otemp, oprecip in points],
+        )
+
+
+def has_historical_weather_for_station(station_code: str, start_ts: int, end_ts: int) -> bool:
+    """Whether this station's weather has already been backfilled for
+    this time range — lets the backfill script skip re-fetching weather
+    for a station+date range it's already covered via an earlier market
+    at the same station, since many bracket markets for one city/day
+    share a station."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM historical_weather_points WHERE station_code=? AND ts BETWEEN ? AND ?",
+            (station_code, start_ts, end_ts),
+        ).fetchone()
+        return row[0] > 0
 
 
 def get_price_history(ticker: str, limit: int = 500) -> list[dict]:
