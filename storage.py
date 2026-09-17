@@ -282,6 +282,9 @@ CREATE TABLE IF NOT EXISTS historical_markets (
     open_time TEXT,
     close_time TEXT,
     result TEXT,              -- 'yes' or 'no', once known
+    settlement_source TEXT,   -- e.g. 'NWS', 'The Weather Company' — extracted all along but discarded before
+    threshold_description TEXT,  -- plain-language threshold, e.g. 'strictly greater than 96F'
+    confidence TEXT,          -- rules_extractor's own confidence in this extraction: 'high'|'medium'|'low'
     backfilled_ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_historical_markets_station ON historical_markets(station_code, measure);
@@ -408,6 +411,14 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE trades ADD COLUMN threshold_low_f REAL",
         "ALTER TABLE trades ADD COLUMN threshold_high_f REAL",
         "ALTER TABLE trades ADD COLUMN fee_cents_paid INTEGER",
+        # historical_markets: settlement_source, threshold_description,
+        # and confidence were extracted by rules_extractor all along but
+        # discarded rather than stored -- added per explicit request,
+        # going forward only (not backfilled onto already-processed
+        # markets, which the person explicitly said not to bother with).
+        "ALTER TABLE historical_markets ADD COLUMN settlement_source TEXT",
+        "ALTER TABLE historical_markets ADD COLUMN threshold_description TEXT",
+        "ALTER TABLE historical_markets ADD COLUMN confidence TEXT",
     ):
         try:
             conn.execute(stmt)
@@ -1469,7 +1480,9 @@ def save_historical_market(ticker: str, series_ticker: str | None = None,
                              event_ticker: str | None = None, station_code: str | None = None,
                              measure: str | None = None, threshold_low_f: float | None = None,
                              threshold_high_f: float | None = None, open_time: str | None = None,
-                             close_time: str | None = None, result: str | None = None) -> None:
+                             close_time: str | None = None, result: str | None = None,
+                             settlement_source: str | None = None, threshold_description: str | None = None,
+                             confidence: str | None = None) -> None:
     """Idempotent by design (INSERT OR REPLACE on the ticker primary key)
     — the backfill script can safely be re-run over a series it's already
     partly processed without creating duplicates or needing its own
@@ -1478,10 +1491,12 @@ def save_historical_market(ticker: str, series_ticker: str | None = None,
         conn.execute(
             "INSERT OR REPLACE INTO historical_markets "
             "(ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f, "
-            "threshold_high_f, open_time, close_time, result, backfilled_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "threshold_high_f, open_time, close_time, result, settlement_source, "
+            "threshold_description, confidence, backfilled_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, series_ticker, event_ticker, station_code, measure, threshold_low_f,
-             threshold_high_f, open_time, close_time, result, int(time.time())),
+             threshold_high_f, open_time, close_time, result, settlement_source,
+             threshold_description, confidence, int(time.time())),
         )
 
 
