@@ -166,6 +166,7 @@ STATION_REFERENCE = {
     # NWS's own systems, including api.weather.gov, key on this new code
     # as of that date. Same physical location/coordinates as before.
     "KDJT": {"name": "President Donald J. Trump Intl (fmr. Palm Beach Intl)", "lat": 26.6831, "lon": -80.0956},
+    "KHOB": {"name": "Lea County Regional Airport, Hobbs, NM", "lat": 32.6833, "lon": -103.2167},
 }
 
 
