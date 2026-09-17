@@ -38,6 +38,70 @@ from weather_data import STATION_REFERENCE, kalshi_station_to_nws_id
 
 log = logging.getLogger("historical_backfill")
 
+# CONFIRMED LIVE, repeatedly, across two different cities: rules_extractor's
+# LLM-based station_code inference hallucinates plausible-looking but WRONG
+# 3-letter codes when a market's rules text states only a bare city name
+# with no airport/station reference — Phoenix's rules text ("at Phoenix
+# for...") produced "CLIPHO" (should be CLIPHX), and in the same live
+# backfill run Austin's rules text produced TWO DIFFERENT wrong codes
+# across different Austin markets in the same series (CLIAIS, then
+# CLIAYC — neither is CLIAUS). This isn't a one-off fluke; it's a real
+# reliability gap in free-text inference for this specific field. The
+# series ticker itself is unambiguous where the free text apparently
+# isn't to the LLM, so for series confirmed here, this ticker-based
+# mapping overrides whatever the LLM extracted, rather than trusting a
+# per-market guess that's been shown to vary market-to-market within the
+# very same series. Every entry here was verified either against real
+# rules text fetched live tonight, or via the standard CLI+3-letter-city
+# pattern already confirmed correct for dozens of other cities. Series
+# that genuinely rotate across multiple cities within one series (the
+# base KXRAIN series, KXRAINWKND) are deliberately NOT included here —
+# a series-level override would be actively wrong for those, since the
+# station differs market to market within the same series ticker.
+CONFIRMED_SERIES_STATION_OVERRIDES = {
+    "KXHIGHAUS": "CLIAUS", "KXLOWTAUS": "CLIAUS", "KXRAINAUSM": "CLIAUS",
+    "KXHIGHCHI": "CLIMDW", "KXLOWTCHI": "CLIMDW", "KXRAINCHIM": "CLIMDW",  # confirmed Midway, not O'Hare
+    "KXHIGHDEN": "CLIDEN", "KXLOWTDEN": "CLIDEN", "KXRAINDENM": "CLIDEN",
+    "KXHIGHLAX": "CLILAX", "KXLOWTLAX": "CLILAX", "KXRAINLAXM": "CLILAX",
+    "KXHIGHMIA": "CLIMIA", "KXLOWTMIA": "CLIMIA", "KXRAINMIAM": "CLIMIA",
+    "KXHIGHNY": "CLINYC", "KXLOWTNYC": "CLINYC", "KXRAINNYCM": "CLINYC", "KXRAINDNYC": "CLINYC",
+    "KXHIGHPHIL": "CLIPHL", "KXLOWTPHIL": "CLIPHL",
+    "KXHIGHTATL": "CLIATL", "KXLOWTATL": "CLIATL",
+    "KXHIGHTBOS": "CLIBOS", "KXLOWTBOS": "CLIBOS",
+    "KXHIGHTDAL": "CLIDFW", "KXLOWTDAL": "CLIDFW", "KXRAINDALM": "CLIDFW",
+    "KXHIGHTDC": "CLIDCA", "KXLOWTDC": "CLIDCA",
+    "KXHIGHTEWR": "CLIEWR", "KXLOWTEWR": "CLIEWR",
+    "KXHIGHTHOU": "CLIHOU", "KXLOWTHOU": "CLIHOU", "KXRAINHOUM": "CLIHOU",
+    "KXHIGHTLV": "CLILAS", "KXLOWTLV": "CLILAS",
+    "KXHIGHTMIN": "CLIMSP", "KXLOWTMIN": "CLIMSP",
+    "KXHIGHTNOLA": "CLIMSY", "KXLOWTNOLA": "CLIMSY",
+    "KXHIGHTOKC": "CLIOKC", "KXLOWTOKC": "CLIOKC",
+    "KXHIGHTPHX": "CLIPHX", "KXLOWTPHX": "CLIPHX",  # confirmed CLIPHO was a wrong LLM guess
+    "KXHIGHTSAN": "CLISAN", "KXLOWTSAN": "CLISAN",
+    "KXHIGHTSATX": "CLISAT", "KXLOWTSATX": "CLISAT",
+    "KXHIGHTSDF": "CLISDF", "KXLOWTSDF": "CLISDF",
+    "KXHIGHTSEA": "CLISEA", "KXLOWTSEA": "CLISEA", "KXRAINSEAM": "CLISEA",
+    "KXHIGHTSFO": "CLISFO", "KXLOWTSFO": "CLISFO", "KXRAINSFOM": "CLISFO",
+    "KXHIGHTTTN": "CLITTN", "KXLOWTTTN": "CLITTN",
+    "KXRAINPVDM": "KPVD",  # confirmed via real rules text: KPVD directly, not CLI-prefixed
+}
+
+
+def apply_station_override(series_ticker: str, extracted_station_code: str | None) -> str | None:
+    """Returns the confirmed override for this series if one exists,
+    logging when it actually changes something so it's visible how often
+    the LLM's guess would otherwise have been wrong. Returns the
+    extractor's own value unchanged for any series not in the confirmed
+    table -- this is a targeted correction for known-unreliable cases,
+    not a replacement for extraction in general."""
+    override = CONFIRMED_SERIES_STATION_OVERRIDES.get(series_ticker)
+    if override is None:
+        return extracted_station_code
+    if extracted_station_code != override:
+        log.info(f"{series_ticker}: overriding extracted station_code "
+                 f"{extracted_station_code!r} with confirmed {override!r}")
+    return override
+
 # Courtesy delays between requests — these are free, no-API-key services
 # (Open-Meteo) and Kalshi's own historical archive; a bulk backfill over
 # years of markets should not hammer either one as fast as possible.
@@ -177,6 +241,7 @@ def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_
 
     rules_text = kalshi.get_historical_market_rules_text(ticker)
     rules = extractor.extract(ticker, rules_text)
+    rules.station_code = apply_station_override(series_ticker, rules.station_code)
 
     open_time = market_obj.get("open_time")
     close_time = market_obj.get("close_time")
