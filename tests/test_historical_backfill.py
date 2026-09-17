@@ -660,6 +660,93 @@ class TestSeriesTemplateIntegration(unittest.TestCase):
         self.assertEqual(stored_b2["threshold_low_f"], 82.0)
         self.assertEqual(stored_b2["threshold_high_f"], 84.0)
 
+    def test_ten_distinct_wordings_interleaved_thrash_free_with_raised_cap(self):
+        """CONFIRMED LIVE: Chicago genuinely has 10 distinct wordings
+        across its history (found by grouping real cached extractions
+        by description shape) -- its 3 dominant shapes alone accounted
+        for 863 separately re-cached tickers under the old design,
+        meaning the same wordings were being relearned via fresh LLM
+        calls over and over rather than reused. Root cause, confirmed
+        directly: eviction used templates.pop(0) -- oldest-ADDED, not
+        least-recently-USED -- so a frequently-needed template learned
+        early could be evicted by a newer, rarer one and then need
+        relearning the very next time it was needed. This reproduces
+        all 10 real confirmed shapes interleaved and verifies each is
+        only ever learned once."""
+        from rules_extractor import MarketRules
+        import re as re_module
+
+        shapes = [
+            ("high temperature strictly less than {}°F", "high"),
+            ("strictly greater than {}°F", "low"),
+            ("high temperature between {} and {} degrees Fahrenheit (inclusive)", "both"),
+            ("strictly greater than {} degrees Fahrenheit", "low"),
+            ("maximum temperature strictly less than {}°F", "high"),
+            ("high temperature between {} and {}°F inclusive", "both"),
+            ("high temperature between {} and {}°F (inclusive)", "both"),
+            ("maximum temperature between {} and {} degrees Fahrenheit (inclusive)", "both"),
+            ("daily high temperature strictly less than {}°F", "high"),
+            ("high temperature between {}°F and {}°F (inclusive)", "both"),
+        ]
+
+        kalshi = MagicMock()
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+
+        texts, markets_list = {}, []
+        for day in range(30):
+            template_text, kind = shapes[day % 10]
+            ticker = f"M{day}"
+            val = 70 + day
+            date_day = (day % 28) + 1
+            if kind == "both":
+                text = f"Settles YES if the {template_text.format(val, val + 2)} for Aug {date_day}, 2026."
+            else:
+                text = f"If the {template_text.format(val)} for Aug {date_day}, 2026, resolves Yes."
+            texts[ticker] = text
+            markets_list.append({
+                "ticker": ticker, "open_time": f"2026-08-{date_day:02d}T00:00:00Z",
+                "close_time": f"2026-08-{date_day:02d}T00:00:00Z",
+                "occurrence_datetime": f"2026-08-{date_day:02d}T14:00:00Z", "result": "yes",
+            })
+
+        kalshi.get_historical_market_rules_text.side_effect = lambda t: texts[t]
+
+        extractor = MagicMock()
+        call_log = []
+        num_re = re_module.compile(r"\d+(?:\.\d+)?")
+
+        def fake_extract(ticker, rules_text, force=False):
+            call_log.append(ticker)
+            for template_text, kind in shapes:
+                if template_text.split("{}")[0] in rules_text:
+                    nums = [float(n) for n in num_re.findall(rules_text) if float(n) < 200]
+                    if kind == "low":
+                        return MarketRules(ticker=ticker, station_code="CLIMDW", settlement_source="NWS",
+                                             measure="temperature_high", threshold_description="x",
+                                             trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                                             threshold_low_f=nums[0] + 0.0001, threshold_high_f=None)
+                    elif kind == "high":
+                        return MarketRules(ticker=ticker, station_code="CLIMDW", settlement_source="NWS",
+                                             measure="temperature_high", threshold_description="x",
+                                             trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                                             threshold_low_f=None, threshold_high_f=nums[0] - 0.0001)
+                    else:
+                        return MarketRules(ticker=ticker, station_code="CLIMDW", settlement_source="NWS",
+                                             measure="temperature_high", threshold_description="x",
+                                             trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                                             threshold_low_f=nums[0], threshold_high_f=nums[1])
+            raise Exception(f"couldn't classify: {rules_text}")
+
+        extractor.extract.side_effect = fake_extract
+
+        templates = None
+        with patch.object(hb, "backfill_weather_for_station"):
+            for m in markets_list:
+                templates = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHCHI", templates=templates)
+
+        self.assertEqual(len(call_log), 10, "each of the 10 distinct shapes should only ever need one real LLM call")
+        self.assertEqual(len(templates), 10, "all 10 templates should fit comfortably under the raised cap")
+
 
 class TestExpirationValueAndBidAskIntegration(unittest.TestCase):
     """expiration_value, bid/ask, and open_interest were already present
