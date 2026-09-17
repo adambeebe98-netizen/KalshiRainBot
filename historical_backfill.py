@@ -1,0 +1,228 @@
+"""
+Orchestrates the full historical backfill: for a given Kalshi series,
+pages through every settled market, extracts its station/measure/
+threshold via the same RulesExtractor the live bot uses, pulls its real
+price history, and reconstructs the weather picture for its station and
+date range — joining Kalshi's own historical archive with Open-Meteo's
+(see historical_weather.py). Explicitly requested: "if we go back,
+extract all of that available data that is applicable to the trades."
+
+Deliberately a standalone script, not part of bot.py's main loop — this
+is a one-time or occasional bulk job over years of history, not
+something to run every 5-minute cycle. Idempotent throughout: every
+storage write here (save_historical_market, and weather backfill via the
+has_historical_weather_for_station check) is safe to re-run over a
+series that's already partly processed, so an interrupted run can just
+be restarted rather than needing its own separate resume-tracking logic.
+
+IMPORTANT, VERIFIED LIMITATION: built against Kalshi's and Open-Meteo's
+documented response shapes (both fetched directly from their own docs
+pages while writing this), not against a live response actually seen —
+every external domain this depends on returned HTTP 403 from the
+environment that wrote it (confirmed directly). Every step here is
+wrapped so one market's failure (a malformed response, a station this
+codebase doesn't have coordinates for, a transient API error) logs and
+moves on to the next market rather than aborting the whole backfill.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from datetime import date, datetime, timezone
+
+import historical_weather
+import storage
+from kalshi_client import KalshiClient
+from rules_extractor import RulesExtractor
+from weather_data import STATION_REFERENCE
+
+log = logging.getLogger("historical_backfill")
+
+# Courtesy delays between requests — these are free, no-API-key services
+# (Open-Meteo) and Kalshi's own historical archive; a bulk backfill over
+# years of markets should not hammer either one as fast as possible.
+_PAGE_DELAY_SECONDS = 0.5
+_PER_MARKET_DELAY_SECONDS = 0.2
+
+
+def _parse_iso_to_unix(iso_str: str | None) -> int | None:
+    """Same parsing pattern as bot.hours_until_close — returns None on a
+    missing/malformed timestamp rather than raising, so one market with
+    a bad timestamp doesn't abort the whole backfill."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_candlestick_price_cents(candle: dict) -> int | None:
+    """
+    Candlestick prices arrive as dollar strings (e.g. "0.5600"), the same
+    "_dollars" pattern this codebase already had one confirmed bug from
+    for live markets (see market_price_cents) — never assume a plain
+    numeric field. Prefers the actual traded price (price.close); if no
+    trade occurred that period, falls back to the ask, then the bid,
+    mirroring how the live bot already falls back when a quote is thin.
+    """
+    price = candle.get("price") or {}
+    yes_ask = candle.get("yes_ask") or {}
+    yes_bid = candle.get("yes_bid") or {}
+    for source in (price.get("close"), yes_ask.get("close"), yes_bid.get("close")):
+        if source is not None:
+            try:
+                return round(float(source) * 100)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _extract_volume(candle: dict) -> int | None:
+    volume_str = candle.get("volume")
+    if volume_str is None:
+        return None
+    try:
+        return round(float(volume_str))
+    except (ValueError, TypeError):
+        return None
+
+
+def backfill_weather_for_station(station_code: str, start_ts: int, end_ts: int) -> bool:
+    """
+    Reconstructs the weather picture for one station over one date range,
+    merging Open-Meteo's forecast and observation series by matching
+    timestamp rather than assuming positional alignment between the two
+    separate API responses (they could, in principle, have gaps in
+    different places). Returns True if it actually fetched anything new,
+    False if this station+range was already covered (see
+    has_historical_weather_for_station) or coordinates aren't known for
+    this station.
+    """
+    if storage.has_historical_weather_for_station(station_code, start_ts, end_ts):
+        return False
+
+    ref = STATION_REFERENCE.get(station_code)
+    if not ref:
+        log.warning(f"No coordinates known for station {station_code} — skipping weather backfill")
+        return False
+
+    start_date = datetime.fromtimestamp(start_ts, tz=timezone.utc).date()
+    end_date = datetime.fromtimestamp(end_ts, tz=timezone.utc).date()
+
+    forecast_points = historical_weather.get_historical_forecast_hourly(
+        ref["lat"], ref["lon"], start_date, end_date
+    )
+    observation_points = historical_weather.get_historical_observation_hourly(
+        ref["lat"], ref["lon"], start_date, end_date
+    )
+
+    # Merge by ISO timestamp string, not by list position — the two API
+    # calls are independent and could in principle return different
+    # numbers of points if one has a data gap the other doesn't.
+    merged: dict[str, dict] = {}
+    for p in forecast_points:
+        merged.setdefault(p.timestamp, {})["forecast_temp_f"] = p.temperature_f
+        merged[p.timestamp]["forecast_precip_pop_pct"] = p.precipitation_probability_pct
+    for p in observation_points:
+        merged.setdefault(p.timestamp, {})["observed_temp_f"] = p.temperature_f
+        merged[p.timestamp]["observed_precip_mm"] = p.precipitation_mm
+
+    rows = []
+    for ts_str, values in merged.items():
+        ts_unix = _parse_iso_to_unix(ts_str)
+        if ts_unix is None:
+            continue
+        rows.append((
+            ts_unix,
+            values.get("forecast_temp_f"),
+            values.get("forecast_precip_pop_pct"),
+            values.get("observed_temp_f"),
+            values.get("observed_precip_mm"),
+        ))
+
+    storage.save_historical_weather_points(station_code, rows)
+    return True
+
+
+def backfill_one_market(kalshi: KalshiClient, extractor: RulesExtractor, market_obj: dict,
+                          series_ticker: str, candlestick_interval: int = 60) -> None:
+    """
+    Backfills everything for one already-settled market: rules
+    extraction, price history, and (if not already covered) its
+    station's weather. Any single failure here should be caught by the
+    caller and logged, not allowed to abort the whole series.
+    """
+    ticker = market_obj["ticker"]
+
+    rules_text = kalshi.get_historical_market_rules_text(ticker)
+    rules = extractor.extract(ticker, rules_text)
+
+    open_time = market_obj.get("open_time")
+    close_time = market_obj.get("close_time")
+    result = market_obj.get("result") or None
+
+    storage.save_historical_market(
+        ticker, series_ticker=series_ticker, event_ticker=market_obj.get("event_ticker"),
+        station_code=rules.station_code, measure=rules.measure,
+        threshold_low_f=rules.threshold_low_f, threshold_high_f=rules.threshold_high_f,
+        open_time=open_time, close_time=close_time, result=result,
+    )
+
+    start_ts = _parse_iso_to_unix(open_time)
+    end_ts = _parse_iso_to_unix(close_time)
+    if start_ts is None or end_ts is None:
+        log.warning(f"{ticker}: missing/malformed open_time or close_time — skipping price/weather backfill")
+        return
+
+    candlestick_data = kalshi.get_historical_candlesticks(
+        series_ticker, ticker, start_ts, end_ts, period_interval=candlestick_interval
+    )
+    candles = candlestick_data.get("candlesticks", [])
+    price_points = [
+        (c["end_period_ts"], _extract_candlestick_price_cents(c), _extract_volume(c))
+        for c in candles if "end_period_ts" in c
+    ]
+    storage.save_historical_price_points(ticker, price_points)
+
+    if rules.station_code:
+        backfill_weather_for_station(rules.station_code, start_ts, end_ts)
+
+
+def backfill_series(kalshi: KalshiClient, extractor: RulesExtractor, series_ticker: str,
+                      max_markets: int | None = None, candlestick_interval: int = 60) -> dict:
+    """
+    Pages through every settled market in one series and backfills each.
+    Returns a summary dict — {"processed": N, "failed": N} — rather than
+    raising, since a partial backfill (most markets succeeded, a few
+    failed) is still a genuinely useful result, not something to discard.
+    """
+    processed = 0
+    failed = 0
+    cursor = None
+
+    while True:
+        page = kalshi.get_historical_markets(series_ticker=series_ticker, cursor=cursor)
+        markets = page.get("markets", [])
+        if not markets:
+            break
+
+        for market_obj in markets:
+            ticker = market_obj.get("ticker", "<unknown>")
+            try:
+                backfill_one_market(kalshi, extractor, market_obj, series_ticker, candlestick_interval)
+                processed += 1
+            except Exception as e:
+                log.warning(f"Failed to backfill {ticker}: {e}")
+                failed += 1
+            if max_markets and (processed + failed) >= max_markets:
+                return {"processed": processed, "failed": failed}
+            time.sleep(_PER_MARKET_DELAY_SECONDS)
+
+        cursor = page.get("cursor")
+        if not cursor:
+            break
+        time.sleep(_PAGE_DELAY_SECONDS)
+
+    return {"processed": processed, "failed": failed}
