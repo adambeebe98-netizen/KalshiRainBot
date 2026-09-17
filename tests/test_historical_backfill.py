@@ -183,6 +183,9 @@ class TestBackfillOneMarket(unittest.TestCase):
         rules.measure = measure
         rules.threshold_low_f = low
         rules.threshold_high_f = high
+        rules.settlement_source = "NWS"
+        rules.threshold_description = "x"
+        rules.confidence = "high"
         return rules
 
     def test_full_backfill_of_one_market_stores_everything(self):
@@ -266,7 +269,8 @@ class TestBackfillSeries(unittest.TestCase):
         ]
         extractor = MagicMock()
         extractor.extract.return_value = MagicMock(station_code=None, measure="temperature_high",
-                                                       threshold_low_f=None, threshold_high_f=None)
+                                                       threshold_low_f=None, threshold_high_f=None,
+                                                       settlement_source="NWS", threshold_description="x", confidence="high")
         kalshi.get_historical_market_rules_text.return_value = ""
 
         with patch.object(hb, "time") as mock_time:  # skip real sleeps in the test
@@ -290,7 +294,8 @@ class TestBackfillSeries(unittest.TestCase):
             if ticker == "BAD":
                 raise Exception("simulated extraction failure")
             return MagicMock(station_code=None, measure="temperature_high",
-                               threshold_low_f=None, threshold_high_f=None)
+                               threshold_low_f=None, threshold_high_f=None,
+                                                       settlement_source="NWS", threshold_description="x", confidence="high")
         extractor.extract.side_effect = extract_side_effect
         kalshi.get_historical_market_rules_text.return_value = ""
 
@@ -310,7 +315,8 @@ class TestBackfillSeries(unittest.TestCase):
         }
         extractor = MagicMock()
         extractor.extract.return_value = MagicMock(station_code=None, measure="temperature_high",
-                                                       threshold_low_f=None, threshold_high_f=None)
+                                                       threshold_low_f=None, threshold_high_f=None,
+                                                       settlement_source="NWS", threshold_description="x", confidence="high")
         kalshi.get_historical_market_rules_text.return_value = ""
 
         with patch.object(hb, "time"):
@@ -370,7 +376,8 @@ class TestBackfillSeriesMinOpenTimeCutoff(unittest.TestCase):
     def _make_extractor(self):
         extractor = MagicMock()
         extractor.extract.return_value = MagicMock(station_code=None, measure="temperature_high",
-                                                       threshold_low_f=None, threshold_high_f=None)
+                                                       threshold_low_f=None, threshold_high_f=None,
+                                                       settlement_source="NWS", threshold_description="x", confidence="high")
         return extractor
 
     def test_markets_older_than_cutoff_are_skipped_not_stored(self):
