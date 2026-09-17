@@ -443,5 +443,102 @@ class TestBackfillSeriesMinOpenTimeCutoff(unittest.TestCase):
         self.assertEqual(result, {"processed": 1, "failed": 0, "skipped_too_old": 0})
 
 
+class TestSeriesTemplateIntegration(unittest.TestCase):
+    """Adam's insight, confirmed correct and confirmed valuable: within
+    one series, every market's rules text is the same template with
+    only the date and threshold substituted. Confirmed live tonight
+    that calling the LLM separately for every market was wasteful past
+    the first one (Austin alone: 3,700+ distinct tickers)."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            conn.execute("DELETE FROM historical_markets")
+            conn.commit()
+
+    def test_only_one_real_llm_call_across_three_markets_in_a_series(self):
+        from rules_extractor import MarketRules
+
+        kalshi = MagicMock()
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        texts = {
+            "M1": ("If the highest temperature recorded in Central Park, New York for July 16, 2026 "
+                   "as reported by the National Weather Service's Climatological Report (Daily), "
+                   "is greater than 96°, then the market resolves to Yes."),
+            "M2": ("If the highest temperature recorded in Central Park, New York for July 17, 2026 "
+                   "as reported by the National Weather Service's Climatological Report (Daily), "
+                   "is greater than 89°, then the market resolves to Yes."),
+            "M3": ("If the highest temperature recorded in Central Park, New York for July 18, 2026 "
+                   "as reported by the National Weather Service's Climatological Report (Daily), "
+                   "is greater than 92°, then the market resolves to Yes."),
+        }
+        kalshi.get_historical_market_rules_text.side_effect = lambda t: texts[t]
+
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="M1", station_code="CLINYC", settlement_source="NWS", measure="temperature_high",
+            threshold_description="x", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=96.0001, threshold_high_f=None,
+        )
+
+        markets = [
+            {"ticker": "M1", "open_time": "2026-07-15T14:00:00Z", "close_time": "2026-07-17T04:59:00Z",
+             "occurrence_datetime": "2026-07-16T14:00:00Z", "result": "no"},
+            {"ticker": "M2", "open_time": "2026-07-16T14:00:00Z", "close_time": "2026-07-18T04:59:00Z",
+             "occurrence_datetime": "2026-07-17T14:00:00Z", "result": "yes"},
+            {"ticker": "M3", "open_time": "2026-07-17T14:00:00Z", "close_time": "2026-07-19T04:59:00Z",
+             "occurrence_datetime": "2026-07-18T14:00:00Z", "result": "no"},
+        ]
+
+        template = None
+        with patch.object(hb, "backfill_weather_for_station"):
+            for m in markets:
+                template = hb.backfill_one_market(kalshi, extractor, m, "KXHIGHNY", template=template)
+
+        self.assertEqual(extractor.extract.call_count, 1, "should only call the LLM once, for the first market")
+
+        for ticker, expected in [("M1", 96.0001), ("M2", 89.0001), ("M3", 92.0001)]:
+            stored = storage.get_historical_market(ticker)
+            self.assertIsNotNone(stored)
+            self.assertAlmostEqual(stored["threshold_low_f"], expected, places=3)
+            self.assertEqual(stored["station_code"], "CLINYC")
+
+    def test_template_is_learned_and_threaded_through_backfill_series(self):
+        """The template must actually flow through backfill_series'
+        own loop, not just work when called directly."""
+        from rules_extractor import MarketRules
+
+        kalshi = MagicMock()
+        kalshi.get_historical_candlesticks.return_value = {"candlesticks": []}
+        texts = {
+            "M1": "If the high temp for Sep 17, 2026 is greater than 90, resolves Yes.",
+            "M2": "If the high temp for Sep 18, 2026 is greater than 85, resolves Yes.",
+        }
+        kalshi.get_historical_market_rules_text.side_effect = lambda t: texts[t]
+        kalshi.get_historical_markets.return_value = {
+            "markets": [
+                {"ticker": "M1", "open_time": "2026-09-16T00:00:00Z", "close_time": "2026-09-18T00:00:00Z",
+                 "occurrence_datetime": "2026-09-17T00:00:00Z", "result": "yes"},
+                {"ticker": "M2", "open_time": "2026-09-17T00:00:00Z", "close_time": "2026-09-19T00:00:00Z",
+                 "occurrence_datetime": "2026-09-18T00:00:00Z", "result": "no"},
+            ],
+            "cursor": "",
+        }
+
+        extractor = MagicMock()
+        extractor.extract.return_value = MarketRules(
+            ticker="M1", station_code="CLIAUS", settlement_source="NWS", measure="temperature_high",
+            threshold_description="x", trace_counts_as_zero=None, fallback_rule=None,
+            confidence="high", threshold_low_f=90.0001, threshold_high_f=None,
+        )
+
+        with patch.object(hb, "time"), patch.object(hb, "backfill_weather_for_station"):
+            hb.backfill_series(kalshi, extractor, "KXHIGHAUS")
+
+        self.assertEqual(extractor.extract.call_count, 1)
+        stored_m2 = storage.get_historical_market("M2")
+        self.assertAlmostEqual(stored_m2["threshold_low_f"], 85.0001, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
