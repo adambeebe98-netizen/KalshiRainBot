@@ -156,6 +156,33 @@ class TestHistoricalEndpoints(unittest.TestCase):
         self.assertEqual(captured["params"]["end_ts"], 2000)
         self.assertEqual(captured["params"]["period_interval"], 60)
 
+    def test_get_historical_market_detail_hits_the_historical_not_live_path(self):
+        """Real, confirmed catch: the LIVE /markets/{ticker} endpoint will
+        not return a market that settled before the ~3 month live cutoff
+        (per Kalshi's own docs) -- any market old enough to need
+        backfilling is almost certainly past that cutoff."""
+        captured, fake_request = self._capture_request({"market": {"ticker": "T1"}})
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            kc.get_historical_market_detail("KXHIGHNY-26JUL15-T90")
+        self.assertEqual(captured["url"], "/historical/markets/KXHIGHNY-26JUL15-T90")
+
+    def test_get_historical_market_rules_text_extracts_the_right_field(self):
+        captured, fake_request = self._capture_request(
+            {"market": {"rules_primary": "Settles YES if temp exceeds 90F"}}
+        )
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            text = kc.get_historical_market_rules_text("T1")
+        self.assertEqual(text, "Settles YES if temp exceeds 90F")
+
+    def test_get_historical_market_rules_text_handles_missing_fields_gracefully(self):
+        captured, fake_request = self._capture_request({"market": {}})
+        with patch("httpx.Client.request", fake_request):
+            kc = KalshiClient()
+            text = kc.get_historical_market_rules_text("T1")
+        self.assertEqual(text, "")
+
 
 if __name__ == "__main__":
     unittest.main()
