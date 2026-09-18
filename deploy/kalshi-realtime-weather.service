@@ -1,0 +1,39 @@
+# Runs realtime_weather_poller.py as a background service, permanently,
+# polling NWS every ~2 minutes for new station observations going forward.
+# Free/cheap sources of RAW station-level METAR data typically only keep a
+# rolling ~30-day window -- unlike Kalshi's own market history, which stays
+# available indefinitely -- so, like the WebSocket listener, any gap in
+# this service's uptime is data that can't be recovered later.
+#
+# Install:
+#   1. Edit the paths below to match where you put this project.
+#   2. sudo cp kalshi-realtime-weather.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable kalshi-realtime-weather   # start on boot
+#   5. sudo systemctl start kalshi-realtime-weather
+#
+# Check on it:
+#   systemctl status kalshi-realtime-weather
+#   journalctl -u kalshi-realtime-weather -f
+#
+# Stop it:
+#   sudo systemctl stop kalshi-realtime-weather
+
+[Unit]
+Description=Kalshi Real-Time Weather Observation Poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/kalshi_weather_bot
+EnvironmentFile=/path/to/kalshi_weather_bot/.env
+ExecStart=/path/to/kalshi_weather_bot/venv/bin/python realtime_weather_poller.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/path/to/kalshi_weather_bot/realtime_weather.log
+StandardError=append:/path/to/kalshi_weather_bot/realtime_weather.log
+
+[Install]
+WantedBy=multi-user.target
