@@ -34,6 +34,57 @@ class KalshiAuthError(RuntimeError):
     pass
 
 
+def load_private_key(private_key_path: str):
+    """Shared with realtime_kalshi_ws.py -- the WebSocket handshake uses the
+    exact same RSA-PSS signing scheme as every REST request (per Kalshi's own
+    docs: "The signature for WebSocket connections follows the same pattern
+    as REST API requests"), so both load the key and sign through this one,
+    single implementation rather than two separately-maintained copies of
+    security-sensitive code."""
+    with open(private_key_path, "rb") as f:
+        return serialization.load_pem_private_key(f.read(), password=None)
+
+
+def sign_message(private_key, method: str, path: str, timestamp_ms: str) -> str:
+    """method+path must be the exact HTTP method and request path Kalshi will
+    receive. For the WebSocket handshake this is GET and the ws path itself
+    (e.g. /trade-api/ws/v2) -- confirmed by Kalshi's docs, not assumed."""
+    message = f"{timestamp_ms}{method}{path}".encode("utf-8")
+    signature = private_key.sign(
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
+    return base64.b64encode(signature).decode("utf-8")
+
+
+def auth_headers(api_key_id: str, private_key, method: str, path: str) -> dict:
+    """The three KALSHI-ACCESS-* headers, freshly timestamped and signed.
+    Shared by the REST client and the WebSocket connection handshake."""
+    ts = str(int(time.time() * 1000))
+    return {
+        "KALSHI-ACCESS-KEY": api_key_id,
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "KALSHI-ACCESS-SIGNATURE": sign_message(private_key, method.upper(), path, ts),
+    }
+
+
+def derive_ws_url(base_url: str) -> str:
+    """https://api.elections.kalshi.com/trade-api/v2 -> wss://.../trade-api/ws/v2
+    Derived from whatever KALSHI_BASE_URL is actually configured (production
+    or demo) rather than hardcoded, so the WebSocket listener always talks to
+    the same environment the REST-based trading bot is already using -- they
+    can never silently drift apart onto different environments."""
+    ws = base_url.rstrip("/")
+    if ws.startswith("https://"):
+        ws = "wss://" + ws[len("https://"):]
+    elif ws.startswith("http://"):
+        ws = "ws://" + ws[len("http://"):]
+    if ws.endswith("/trade-api/v2"):
+        ws = ws[: -len("/trade-api/v2")] + "/trade-api/ws/v2"
+    return ws
+
+
 def market_price_cents(market: dict, field: str) -> int | None:
     """
     Kalshi's /markets LIST endpoint returns prices as decimal DOLLAR
@@ -77,30 +128,18 @@ class KalshiClient:
                 "Set them in your .env file."
             )
 
-        with open(key_path, "rb") as f:
-            self._private_key = serialization.load_pem_private_key(f.read(), password=None)
-
+        self._private_key = load_private_key(key_path)
         self._client = httpx.Client(base_url=self.base_url, timeout=15.0)
 
     # ---------- signing ----------
 
     def _sign(self, method: str, path: str, timestamp_ms: str) -> str:
-        message = f"{timestamp_ms}{method}{path}".encode("utf-8")
-        signature = self._private_key.sign(
-            message,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256(),
-        )
-        return base64.b64encode(signature).decode("utf-8")
+        return sign_message(self._private_key, method, path, timestamp_ms)
 
     def _headers(self, method: str, path: str) -> dict:
-        ts = str(int(time.time() * 1000))
-        return {
-            "KALSHI-ACCESS-KEY": self.api_key_id,
-            "KALSHI-ACCESS-TIMESTAMP": ts,
-            "KALSHI-ACCESS-SIGNATURE": self._sign(method.upper(), path, ts),
-            "Content-Type": "application/json",
-        }
+        headers = auth_headers(self.api_key_id, self._private_key, method, path)
+        headers["Content-Type"] = "application/json"
+        return headers
 
     def _request(self, method: str, path: str, params: dict | None = None,
                  json_body: dict | None = None) -> dict:
