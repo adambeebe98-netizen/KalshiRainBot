@@ -13,7 +13,7 @@ from __future__ import annotations
 import unittest
 
 from rules_extractor import MarketRules
-from series_template import build_template, try_apply_template
+from series_template import build_template, try_apply_template, _find_date_match
 
 
 def _rules(**overrides):
@@ -135,6 +135,49 @@ class TestEdgeCases(unittest.TestCase):
             rules, "2026-07-16T14:00:00Z"
         )
         self.assertIsNone(template)
+
+
+class TestOccurrenceDatetimeOffByOne(unittest.TestCase):
+    """CONFIRMED LIVE via a full 615-market replay of real KXHIGHTNOLA
+    data: Kalshi's own occurrence_datetime for this series is reliably
+    off by a full day from the date the market's own ticker and rules
+    text actually state (a ticker for Jul 17 reports occurrence_datetime
+    of Jul 18). Since the exact date never appeared in the text, every
+    template built came out with that day's specific date baked in as
+    fixed, unmasked text -- unable to match a different day's market
+    ever again. This forced 552 of 615 real markets (90%) to fall back
+    to their own individual LLM call rather than reuse any of the only
+    3 genuinely distinct templates New Orleans actually needed."""
+
+    def test_finds_the_real_date_despite_a_one_day_offset(self):
+        text = ("If the maximum temperature recorded at New Orleans for Jul 17, 2026, is greater than 93° "
+                 "fahrenheit according to the National Weather Service Climatological Report (Daily), "
+                 "then the market resolves to Yes.")
+        match = _find_date_match(text, "2026-07-18T14:00:00Z")  # the real, confirmed off-by-one value
+        self.assertEqual(match, "Jul 17, 2026")
+
+    def test_template_reusable_across_different_days_with_the_same_real_bug(self):
+        text1 = ("If the maximum temperature recorded at New Orleans for Jul 17, 2026, is greater than 93° "
+                  "fahrenheit according to the National Weather Service Climatological Report (Daily), "
+                  "then the market resolves to Yes.")
+        rules1 = MarketRules(ticker="T1", station_code="CLIMSY", settlement_source="NWS",
+                              measure="temperature_high", threshold_description="x",
+                              trace_counts_as_zero=None, fallback_rule=None, confidence="high",
+                              threshold_low_f=93.0001, threshold_high_f=None)
+        tmpl = build_template(text1, rules1, "2026-07-18T14:00:00Z")
+        self.assertIsNotNone(tmpl)
+
+        text2 = ("If the maximum temperature recorded at New Orleans for Jul 15, 2026, is greater than 95° "
+                  "fahrenheit according to the National Weather Service Climatological Report (Daily), "
+                  "then the market resolves to Yes.")
+        result = try_apply_template(tmpl, text2, "T2")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.threshold_low_f, 95.0001)
+
+    def test_still_returns_none_when_no_nearby_date_matches_at_all(self):
+        text = "This text genuinely contains no date at all."
+        match = _find_date_match(text, "2026-07-18T14:00:00Z")
+        self.assertIsNone(match)
 
 
 if __name__ == "__main__":
