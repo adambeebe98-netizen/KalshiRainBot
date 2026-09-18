@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rules_extractor import MarketRules
 
@@ -56,23 +56,41 @@ def _find_date_match(rules_text: str, occurrence_datetime_iso: str | None) -> st
     the day BEFORE the actual weather event and close_time is the day
     AFTER (time is left for the official report to publish), so neither
     matches the date the rules text actually states. occurrence_datetime
-    is the field that does. Returns None if no format matches -- callers
-    must not build a template in that case, since the date can't be
-    safely generalized to other markets."""
+    is the field that does -- USUALLY: CONFIRMED LIVE for KXHIGHTNOLA
+    that Kalshi's own occurrence_datetime can be off by a full day from
+    the date the market's own ticker and rules text actually state (a
+    ticker for Jul 17 reporting occurrence_datetime of Jul 18). Since
+    the exact date never appeared in the text, every single template
+    built came out with that day's specific date baked in as fixed,
+    unmasked text -- unable to ever match a different day's market
+    again, forcing nearly every market in the series (552 of 615, 90%,
+    confirmed directly) to fall back to its own fresh LLM call. The
+    ticker's own embedded date has been reliable in every case seen
+    tonight, but rather than trust either source blindly, this tries a
+    small window of nearby dates when the exact one doesn't literally
+    appear in the text -- each candidate is still required to be an
+    exact, literal substring match, so this can never mask the wrong
+    date: a market's rules text only ever states one specific date, and
+    at most one candidate in the window will ever actually be present.
+    Returns None if no format matches -- callers must not build a
+    template in that case, since the date can't be safely generalized
+    to other markets."""
     if not occurrence_datetime_iso:
         return None
     try:
-        d = datetime.fromisoformat(occurrence_datetime_iso.replace("Z", "+00:00")).date()
+        base_date = datetime.fromisoformat(occurrence_datetime_iso.replace("Z", "+00:00")).date()
     except (ValueError, TypeError):
         return None
-    for fmt in _DATE_FORMATS:
-        variant = d.strftime(fmt)
-        # strftime can zero-pad the day (e.g. "July 06, 2026"); also try
-        # the more natural non-padded form ("July 6, 2026").
-        no_pad = variant.replace(f" 0{d.day}", f" {d.day}") if d.day < 10 else variant
-        for candidate in {variant, no_pad}:
-            if candidate in rules_text:
-                return candidate
+    for offset in (0, -1, 1, -2, 2):
+        d = base_date + timedelta(days=offset)
+        for fmt in _DATE_FORMATS:
+            variant = d.strftime(fmt)
+            # strftime can zero-pad the day (e.g. "July 06, 2026"); also try
+            # the more natural non-padded form ("July 6, 2026").
+            no_pad = variant.replace(f" 0{d.day}", f" {d.day}") if d.day < 10 else variant
+            for candidate in {variant, no_pad}:
+                if candidate in rules_text:
+                    return candidate
     return None
 
 
