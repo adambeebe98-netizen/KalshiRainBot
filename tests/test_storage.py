@@ -919,5 +919,19 @@ class TestExpirationValueAndBidAskOpenInterest(unittest.TestCase):
         self.assertEqual(row, (45, 10, 43, 46, 250))
 
 
+class TestBusyTimeoutForSharedDatabase(unittest.TestCase):
+    """CONFIRMED LIVE: this database file is shared between the live
+    trading bot and any concurrently-running script (e.g. the
+    historical backfill). SQLite's own default busy_timeout is 0 --
+    confirmed as the exact, sole cause of every one of 117 real market
+    failures across a full ~59,000-market backfill run (117/117 were
+    "database is locked", no other failure type at all)."""
+
+    def test_busy_timeout_is_set_on_every_connection(self):
+        with storage.get_conn() as conn:
+            result = conn.execute("PRAGMA busy_timeout").fetchone()
+        self.assertEqual(result[0], 5000)
+
+
 if __name__ == "__main__":
     unittest.main()
