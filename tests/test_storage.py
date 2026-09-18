@@ -919,6 +919,51 @@ class TestExpirationValueAndBidAskOpenInterest(unittest.TestCase):
         self.assertEqual(row, (45, 10, 43, 46, 250))
 
 
+class TestRealtimeTables(unittest.TestCase):
+    """realtime_ticks and realtime_weather_obs -- the second-by-second
+    Kalshi WebSocket feed and the NWS observation poller, both captured
+    going forward via realtime_kalshi_ws.py / realtime_weather_poller.py."""
+
+    def setUp(self):
+        storage.init_db()
+        _clear("realtime_ticks", "realtime_weather_obs")
+
+    def test_realtime_ticks_allows_multiple_events_same_second(self):
+        # Deliberately NOT deduplicated -- two genuinely distinct events
+        # in the same second must both survive, unlike the weather table.
+        storage.save_realtime_tick("KXRAIN-26SEP18-HOU", "ticker", 1000, 1001,
+                                    55, 54, 56, 120, 300, '{"a":1}')
+        storage.save_realtime_tick("KXRAIN-26SEP18-HOU", "ticker", 1000, 1002,
+                                    56, 55, 57, 121, 300, '{"a":2}')
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM realtime_ticks WHERE ticker=?",
+                ("KXRAIN-26SEP18-HOU",),
+            ).fetchone()
+        self.assertEqual(row[0], 2)
+
+    def test_realtime_weather_obs_dedupes_repeat_polls(self):
+        first = storage.save_realtime_weather_obs(
+            "KHOU", "2026-09-18T08:00:00Z", 2000, 88.5, 0.0, 0.0, "Clear")
+        repeat = storage.save_realtime_weather_obs(
+            "KHOU", "2026-09-18T08:00:00Z", 2100, 88.5, 0.0, 0.0, "Clear")
+        self.assertTrue(first)
+        self.assertFalse(repeat)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM realtime_weather_obs WHERE station_code=?",
+                ("KHOU",),
+            ).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_realtime_weather_obs_new_reading_is_not_deduped(self):
+        storage.save_realtime_weather_obs(
+            "KAUS", "2026-09-18T08:00:00Z", 2000, 88.5, 0.0, 0.0, "Clear")
+        second = storage.save_realtime_weather_obs(
+            "KAUS", "2026-09-18T09:00:00Z", 5600, 89.1, 0.0, 0.0, "Clear")
+        self.assertTrue(second)
+
+
 class TestBusyTimeoutForSharedDatabase(unittest.TestCase):
     """CONFIRMED LIVE: this database file is shared between the live
     trading bot and any concurrently-running script (e.g. the
