@@ -335,6 +335,60 @@ CREATE TABLE IF NOT EXISTS historical_weather_points (
 );
 CREATE INDEX IF NOT EXISTS idx_historical_weather_points_station_ts ON historical_weather_points(station_code, ts);
 
+-- Live, second-by-second Kalshi market data captured going forward via
+-- realtime_kalshi_ws.py's WebSocket subscription. Distinct in kind from
+-- historical_price_points (which holds one row per HOURLY candlestick,
+-- reconstructed after the fact): this is a true, append-only event log --
+-- every individual ticker/trade push Kalshi sends, at whatever real
+-- cadence the market actually moves. Deliberately no UNIQUE constraint on
+-- (ticker, ts): multiple genuine events can share the same second when a
+-- market is active, and collapsing them would be real data loss, not
+-- dedup -- the opposite situation from the historical candlestick tables.
+-- raw_json keeps the full, unparsed message alongside the parsed columns,
+-- since we don't yet know which fields this new pipeline will end up
+-- needing -- the same lesson historical_price_points' discarded bid/ask/
+-- open_interest columns taught the hard way earlier tonight.
+CREATE TABLE IF NOT EXISTS realtime_ticks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    channel TEXT NOT NULL,        -- 'ticker' | 'trade' | 'market_lifecycle_v2'
+    ts INTEGER NOT NULL,          -- event time AS REPORTED BY KALSHI, Unix seconds
+    received_ts INTEGER NOT NULL, -- when we actually received it -- lets us
+                                   -- later measure feed latency and spot any
+                                   -- gap where the connection was silently down
+    yes_price_cents INTEGER,      -- 'ticker': last trade price. 'trade': the executed yes price.
+    yes_bid_cents INTEGER,
+    yes_ask_cents INTEGER,
+    volume INTEGER,               -- 'ticker': cumulative volume. 'trade': this trade's own size.
+    open_interest INTEGER,
+    raw_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_realtime_ticks_ticker_ts ON realtime_ticks(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_realtime_ticks_received_ts ON realtime_ticks(received_ts);
+
+-- Live weather station observations, polled going forward via
+-- realtime_weather_poller.py against NWS's own real-time observation
+-- endpoint (weather_data.get_station_latest_observation) -- NOT a
+-- websocket, since real ASOS stations only publish official observations
+-- roughly hourly (with occasional ~5-min "special" reports during rapidly
+-- changing conditions); nothing updates continuously enough for a genuine
+-- push feed to mean anything here. Deduplicated on (station_code, ts) via
+-- a real UNIQUE constraint, since polling every ~2 minutes will see the
+-- SAME underlying observation many times over between genuinely new ones --
+-- unlike realtime_ticks, repeats here really are just repeats, not new data.
+CREATE TABLE IF NOT EXISTS realtime_weather_obs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_code TEXT NOT NULL,
+    ts TEXT NOT NULL,             -- NWS's own observation timestamp (ISO string) -- the natural, unique key per real observation
+    received_ts INTEGER NOT NULL,
+    temp_f REAL,
+    precip_last_hour_mm REAL,
+    precip_last_3hr_mm REAL,
+    description TEXT,
+    UNIQUE(station_code, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_realtime_weather_obs_station_ts ON realtime_weather_obs(station_code, ts);
+
 -- Human-approved overrides to the heuristic strategies' guessed thresholds
 -- (swing/favorites/longshot — never the calibrated model or arbitrage).
 -- Only ever written by the dashboard's "Apply" button (see web_ui/app.py) —
@@ -1615,6 +1669,42 @@ def save_historical_weather_points(station_code: str,
             "VALUES (?,?,?,?,?,?)",
             [(station_code, ts, ftemp, fpop, otemp, oprecip) for ts, ftemp, fpop, otemp, oprecip in points],
         )
+
+
+def save_realtime_tick(ticker: str, channel: str, ts: int, received_ts: int,
+                        yes_price_cents: int | None, yes_bid_cents: int | None,
+                        yes_ask_cents: int | None, volume: int | None,
+                        open_interest: int | None, raw_json: str) -> None:
+    """One row per WebSocket message -- called once per message, not
+    batched, since realtime_kalshi_ws.py is a long-running listener
+    writing as messages arrive rather than a batch job. No INSERT OR
+    IGNORE here on purpose -- see the table's own comment for why a
+    UNIQUE constraint would be real data loss for this table."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO realtime_ticks "
+            "(ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents, "
+            "yes_ask_cents, volume, open_interest, raw_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents,
+             yes_ask_cents, volume, open_interest, raw_json),
+        )
+
+
+def save_realtime_weather_obs(station_code: str, ts: str, received_ts: int,
+                                temp_f: float | None, precip_last_hour_mm: float | None,
+                                precip_last_3hr_mm: float | None, description: str | None) -> bool:
+    """Returns True if this was a genuinely new observation, False if it was
+    a repeat of one already stored (expected on most polls, since NWS
+    observations only change roughly hourly but we poll every ~2 min) --
+    lets the poller log real new-observation counts rather than noise."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO realtime_weather_obs "
+            "(station_code, ts, received_ts, temp_f, precip_last_hour_mm, precip_last_3hr_mm, description) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (station_code, ts, received_ts, temp_f, precip_last_hour_mm, precip_last_3hr_mm, description),
+        )
+        return cur.rowcount > 0
 
 
 def has_historical_weather_for_station(station_code: str, start_ts: int, end_ts: int) -> bool:
