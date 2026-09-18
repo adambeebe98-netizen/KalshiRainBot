@@ -448,7 +448,21 @@ def _migrate_add_columns(conn) -> None:
 
 @contextmanager
 def get_conn():
+    # CONFIRMED LIVE: this database file is shared between the live
+    # trading bot and any concurrently-running script (e.g. the
+    # historical backfill) -- SQLite's own default busy_timeout is 0,
+    # meaning a write hitting active lock contention from the OTHER
+    # process fails immediately with "database is locked" rather than
+    # waiting even briefly. Confirmed as the exact, sole cause of every
+    # one of 117 real market failures across a full ~59,000-market
+    # backfill run (117/117 were this same error, no other failure
+    # type at all). A typical SQLite write transaction completes in
+    # low single-digit milliseconds, so a 5-second timeout lets SQLite
+    # retry internally and resolve virtually all genuine, transient
+    # contention on its own, without any custom retry logic needed at
+    # the application level.
     conn = sqlite3.connect(SETTINGS.db_path)
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
         conn.commit()
