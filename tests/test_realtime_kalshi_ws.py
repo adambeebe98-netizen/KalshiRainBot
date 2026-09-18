@@ -15,7 +15,7 @@ from tests.helpers import use_temp_db
 
 use_temp_db()
 
-from realtime_kalshi_ws import ParsedTick, discover_open_market_tickers, parse_message
+from realtime_kalshi_ws import ParsedTick, discover_open_market_tickers, is_tracked_series_ticker, parse_message
 
 
 class TestParseMessage(unittest.TestCase):
@@ -87,6 +87,28 @@ class TestParseMessage(unittest.TestCase):
         # message; parse_message itself should not swallow it.
         with self.assertRaises(json.JSONDecodeError):
             parse_message("not json", received_ts=1000)
+
+
+class TestIsTrackedSeriesTicker(unittest.TestCase):
+    """Guards against a real, confirmed-live bug: market_lifecycle_v2 fires
+    for every market on the entire exchange, not just the weather tickers
+    subscribed alongside it -- without this filter, a burst of unrelated
+    markets opening at once (e.g. ~25 KXBTCD Bitcoin markets in one second)
+    triggers a matching burst of unnecessary subscribe calls, which stalled
+    the event loop long enough to disconnect the WebSocket via a starved
+    keepalive ping on the very first live run."""
+
+    def test_matches_a_real_weather_ticker(self):
+        self.assertTrue(is_tracked_series_ticker(
+            "KXRAIN-26SEP18-HOU", ("KXRAIN", "KXHIGH", "KXLOW")))
+
+    def test_rejects_unrelated_crypto_ticker(self):
+        self.assertFalse(is_tracked_series_ticker(
+            "KXBTCD-26SEP1911-T84899.99", ("KXRAIN", "KXHIGH", "KXLOW")))
+
+    def test_rejects_unrelated_election_ticker(self):
+        self.assertFalse(is_tracked_series_ticker(
+            "KXELECTUKRAINE-26", ("KXRAIN", "KXHIGH", "KXLOW")))
 
 
 class TestDiscoverOpenMarketTickers(unittest.TestCase):
