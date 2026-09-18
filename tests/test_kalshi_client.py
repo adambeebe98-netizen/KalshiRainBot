@@ -184,5 +184,33 @@ class TestHistoricalEndpoints(unittest.TestCase):
         self.assertEqual(text, "")
 
 
+class TestDeriveWsUrl(unittest.TestCase):
+    """realtime_kalshi_ws.py derives its WebSocket URL from KALSHI_BASE_URL
+    rather than hardcoding one, so it always matches whichever environment
+    (production or demo) the REST-based trading bot is actually configured
+    for -- they can never silently point at two different environments."""
+
+    def test_derives_production_ws_url(self):
+        from kalshi_client import derive_ws_url
+        self.assertEqual(
+            derive_ws_url("https://api.elections.kalshi.com/trade-api/v2"),
+            "wss://api.elections.kalshi.com/trade-api/ws/v2",
+        )
+
+    def test_derives_demo_ws_url(self):
+        from kalshi_client import derive_ws_url
+        self.assertEqual(
+            derive_ws_url("https://demo-api.kalshi.co/trade-api/v2"),
+            "wss://demo-api.kalshi.co/trade-api/ws/v2",
+        )
+
+    def test_tolerates_trailing_slash(self):
+        from kalshi_client import derive_ws_url
+        self.assertEqual(
+            derive_ws_url("https://api.elections.kalshi.com/trade-api/v2/"),
+            "wss://api.elections.kalshi.com/trade-api/ws/v2",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
