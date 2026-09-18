@@ -157,6 +157,24 @@ def parse_message(raw_message: str, received_ts: int) -> tuple[Optional[ParsedTi
     return tick, msg_type, msg
 
 
+def is_tracked_series_ticker(market_ticker: str, keywords: tuple[str, ...]) -> bool:
+    """CONFIRMED LIVE: Kalshi's market_lifecycle_v2 channel fires for every
+    market on the ENTIRE exchange (crypto price ladders, sports, elections,
+    everything) regardless of the market_tickers passed alongside it in the
+    same subscribe command -- this makes sense in hindsight, since a "new
+    market just opened" event inherently can't be scoped to a ticker that
+    doesn't exist yet at subscribe time. Confirmed the hard way: a single
+    burst of ~25 new KXBTCD (Bitcoin) markets opening at once triggered
+    ~25 unrelated subscribe calls in a row, which stalled the event loop
+    long enough to starve the connection's own keepalive ping and get us
+    disconnected. So this filters client-side using the exact same
+    substring-match logic as discover_series_tickers() -- a market ticker
+    always starts with its series ticker as a prefix, so this correctly
+    catches only OUR weather series, never anything else on the exchange."""
+    ticker_lower = market_ticker.lower()
+    return any(keyword.lower() in ticker_lower for keyword in keywords)
+
+
 async def _subscribe(ws, channels: list[str], market_tickers: list[str], next_id: list[int]) -> None:
     if not market_tickers:
         return
@@ -221,6 +239,17 @@ async def run_listener() -> None:
                             log.warning("Kalshi WS error message: %s", msg)
                             continue
 
+                        if tick is not None and tick.channel == "market_lifecycle_v2":
+                            # Filter BEFORE storing or acting -- see
+                            # is_tracked_series_ticker's own docstring for why
+                            # this channel needs a client-side filter at all.
+                            if not is_tracked_series_ticker(tick.ticker, SETTINGS.discovery_keywords):
+                                continue
+                            if tick.ticker not in tracked:
+                                tracked.add(tick.ticker)
+                                await _subscribe(ws, ["ticker", "trade"], [tick.ticker], next_id)
+                                log.info("New weather market via lifecycle event, subscribed: %s", tick.ticker)
+
                         if tick is not None:
                             storage.save_realtime_tick(
                                 ticker=tick.ticker, channel=tick.channel, ts=tick.ts,
@@ -229,10 +258,6 @@ async def run_listener() -> None:
                                 volume=tick.volume, open_interest=tick.open_interest, raw_json=raw,
                             )
                             ticks_written += 1
-                            if tick.channel == "market_lifecycle_v2" and tick.ticker not in tracked:
-                                tracked.add(tick.ticker)
-                                await _subscribe(ws, ["ticker", "trade"], [tick.ticker], next_id)
-                                log.info("New market via lifecycle event, subscribed: %s", tick.ticker)
 
                     now = time.time()
                     if now - last_log > 300:
