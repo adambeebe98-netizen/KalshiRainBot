@@ -1,0 +1,38 @@
+# Runs realtime_kalshi_ws.py as a background service, permanently, so
+# second-by-second market data is captured continuously going forward --
+# this is NOT something that can be backfilled later the way historical
+# candlesticks can, so any gap in this service's uptime is a permanent
+# gap in the data.
+#
+# Install:
+#   1. Edit the paths below to match where you put this project.
+#   2. sudo cp kalshi-realtime-ws.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable kalshi-realtime-ws   # start on boot
+#   5. sudo systemctl start kalshi-realtime-ws
+#
+# Check on it:
+#   systemctl status kalshi-realtime-ws
+#   journalctl -u kalshi-realtime-ws -f
+#
+# Stop it:
+#   sudo systemctl stop kalshi-realtime-ws
+
+[Unit]
+Description=Kalshi Real-Time WebSocket Tick Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/kalshi_weather_bot
+EnvironmentFile=/path/to/kalshi_weather_bot/.env
+ExecStart=/path/to/kalshi_weather_bot/venv/bin/python realtime_kalshi_ws.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/path/to/kalshi_weather_bot/realtime_ws.log
+StandardError=append:/path/to/kalshi_weather_bot/realtime_ws.log
+
+[Install]
+WantedBy=multi-user.target
