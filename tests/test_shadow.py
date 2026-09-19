@@ -15,6 +15,7 @@ from tests.helpers import use_temp_db, clear_tables
 
 use_temp_db()
 
+import fees  # noqa: E402
 import storage  # noqa: E402
 import shadow  # noqa: E402
 import calibration  # noqa: E402
@@ -1331,6 +1332,87 @@ class TestNoSideProbabilityDirection(unittest.TestCase):
         with storage.get_conn() as conn:
             row = conn.execute("SELECT * FROM shadow_trades WHERE strategy='calibrated_balanced' AND ticker='T3'").fetchone()
         self.assertIsNone(row, "a genuinely unprofitable NO trade must still be rejected")
+
+
+class TestFeesComeOutOfSettledPnL(unittest.TestCase):
+    """Settled P&L is NET of the real Kalshi taker fee. Until this, every
+    strategy's recorded history was gross, which doesn't just inflate the
+    numbers — it biases the leaderboard, because fees scale with how many
+    ORDERS a strategy places, not with how much edge it finds."""
+
+    def setUp(self):
+        storage.init_db()
+        with storage.get_conn() as conn:
+            clear_tables(conn, "shadow_trades", "shadow_bankroll_snapshots",
+                         "calibration_stats", "price_history")
+        shadow._engines = None
+        shadow.ACTIVE_STRATEGIES = shadow._load_active_strategies()
+
+    def test_a_won_trade_is_booked_net_of_the_entry_fee(self):
+        storage.log_shadow_trade("calibrated_balanced", "W1", "yes", 10, 40,
+                                  fee_cents_paid=17)
+        settled = shadow.settle({"W1": (True, "yes")})
+        self.assertEqual(settled, 1)
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT pnl_cents, fees_applied_to_pnl FROM shadow_trades "
+                                "WHERE ticker='W1'").fetchone()
+        self.assertEqual(row[0], (100 - 40) * 10 - 17)
+        self.assertEqual(row[1], 1)
+
+    def test_a_lost_trade_pays_the_fee_too(self):
+        """The fee is charged when the order fills, so losing the bet
+        costs the stake AND the fee — not just the stake."""
+        storage.log_shadow_trade("calibrated_balanced", "L1", "yes", 10, 40,
+                                  fee_cents_paid=17)
+        shadow.settle({"L1": (True, "no")})
+        with storage.get_conn() as conn:
+            pnl = conn.execute("SELECT pnl_cents FROM shadow_trades WHERE ticker='L1'").fetchone()[0]
+        self.assertEqual(pnl, -40 * 10 - 17)
+
+    def test_a_row_with_no_recorded_fee_is_estimated_not_treated_as_free(self):
+        storage.log_shadow_trade("calibrated_balanced", "E1", "yes", 10, 40)
+        shadow.settle({"E1": (True, "yes")})
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT pnl_cents, fee_cents_paid FROM shadow_trades "
+                                "WHERE ticker='E1'").fetchone()
+        expected_fee = fees.taker_fee_cents(10, 40)
+        self.assertGreater(expected_fee, 0)
+        self.assertEqual(row[0], (100 - 40) * 10 - expected_fee)
+        self.assertEqual(row[1], expected_fee)
+
+    def test_an_arbitrage_row_is_charged_for_both_of_its_real_orders(self):
+        """side='both' is one row but two real orders, so the fee is the
+        sum of two per-order fees — never the formula applied once to the
+        combined pair price, which would understate it badly (a 98c pair
+        price sits at the cheap end of the fee curve; its two ~49c legs
+        sit at the expensive peak)."""
+        storage.log_shadow_trade("arbitrage", "A1", "both", 10, 98)
+        shadow.settle({"A1": (True, "yes")})
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT pnl_cents, fee_cents_paid FROM shadow_trades "
+                                "WHERE ticker='A1'").fetchone()
+        two_leg_fee = fees.taker_fee_cents(10, 49) * 2
+        self.assertEqual(row[1], two_leg_fee)
+        self.assertGreater(two_leg_fee, fees.taker_fee_cents(10, 98),
+                           "the two-order fee must exceed the naive single-order one")
+        self.assertEqual(row[0], (100 - 98) - two_leg_fee)
+
+    def test_a_swing_exit_pays_the_fee_twice(self):
+        """Selling early is a second taker order. A position held to
+        settlement pays one fee; one exited early pays two — the exact
+        asymmetry an early-exit rule has to beat to be worth taking."""
+        tid = storage.log_shadow_trade("swing", "S1", "yes", 10, 40,
+                                        exit_target_cents=50, fee_cents_paid=17)
+        storage.log_price_snapshot("S1", yes_ask=57, yes_bid=55)
+        closed = shadow.check_swing_exits()
+        self.assertEqual(closed, 1)
+        with storage.get_conn() as conn:
+            row = conn.execute("SELECT status, pnl_cents, fee_cents_paid FROM shadow_trades "
+                                "WHERE id=?", (tid,)).fetchone()
+        expected_fee = 17 + fees.taker_fee_cents(10, 55)
+        self.assertEqual(row[0], "sold")
+        self.assertEqual(row[2], expected_fee)
+        self.assertEqual(row[1], (55 - 40) * 10 - expected_fee)
 
 
 if __name__ == "__main__":

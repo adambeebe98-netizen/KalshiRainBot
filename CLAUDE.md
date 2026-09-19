@@ -100,9 +100,59 @@ class that touches a shared table must clear that table in its own
 fails only under the full `discover` run — always run the full suite
 before considering something done, not just the file you touched.
 
+**Settled P&L is NET of real Kalshi fees, and that's load-bearing.**
+`settlement.py` and every close path in `shadow.py` subtract the taker
+fee before writing `pnl_cents` (entry fee only for a position held to
+settlement; entry + exit for one sold early — swing exits, bracket
+offloads). `fee_cents_paid` on the row is the total charged, and
+`fees_applied_to_pnl=1` marks a row as already corrected. Before this,
+P&L was gross, which didn't just inflate the numbers — it biased the
+leaderboard toward whichever strategies place the most ORDERS, since the
+fee scales with order count, not edge. `rederive_fees.py` applied the
+same correction to the 2,059 rows that settled before the change
+($216.79 total; four strategies flipped from apparently profitable to
+negative). It's idempotent, but it rebuilds bankroll snapshots, so the
+bot must be STOPPED while it runs or the running process's in-memory
+bankroll overwrites the corrections on its next cycle.
+
 **Credentials still needing rotation** (flagged, not yet done): GitHub
 PAT, Kalshi API key, dashboard password. Live in `.env` on the droplet —
 never hardcode them in this repo, including in this file.
+
+## The validation vault (read before ANY modelling work)
+
+`splits.py` defines three fixed, hard-coded ranges on
+`historical_markets.close_time`:
+
+```
+TRAIN   close_time <  2026-02-19                     25,782 markets
+DEV     2026-02-19 <= close_time <  2026-04-19       10,921 markets
+VAULT   2026-04-19 <= close_time <  2026-07-20       22,430 markets
+```
+
+Markets closing on/after 2026-07-20 (everything the live bot is capturing
+now) are in NO split — ask for `Split.FUTURE` explicitly if you want them.
+
+**The rule: no result computed on vault data is valid unless it was the
+FIRST time that candidate touched the vault.** A second look is not an
+out-of-sample estimate any more — it's a number that was selected for,
+and the vault is spent for that idea. Training, tuning, feature
+selection, threshold picking, and "let me just eyeball whether it
+generalizes" all count as touching it.
+
+Enforcement is in code, not in discipline: `splits.load(...)` returns
+TRAIN by default and raises `VaultAccessError` on the vault unless called
+with `allow_vault=True` AND a non-empty `reason`, which is appended to
+the `vault_access_log` table with the calling file:line and row count.
+Check `splits.vault_access_history()` before trusting any out-of-sample
+number — if the candidate already appears there, it isn't one.
+
+Read historical data through `splits.load()` rather than querying
+`historical_markets` / `historical_price_points` /
+`historical_weather_points` directly. A raw query bypasses the vault, and
+that's exactly the kind of shortcut that's invisible three months later.
+The split boundaries are constants on purpose — if they were config
+they'd drift the first time a result disappointed.
 
 ## Real-time pipeline status (as of last session)
 

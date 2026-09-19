@@ -534,7 +534,12 @@ def scan_and_trade(kalshi: KalshiClient, extractor: RulesExtractor,
             storage.log_trade(ticker, signal.side, contracts, price, mode, order_id,
                                model_probability=signal.model_probability_yes,
                                station_code=rules.station_code, measure=rules.measure,
-                               bot_version=get_git_commit())
+                               bot_version=get_git_commit(),
+                               # The real fee find_max_profitable_size already
+                               # charged against this size when deciding it was
+                               # worth trading — stored so settlement deducts the
+                               # exact number rather than recomputing an estimate.
+                               fee_cents_paid=fill.fee_cents)
             risk.record_fill(cost_cents=contracts * price)
 
 

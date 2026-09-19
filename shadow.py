@@ -756,16 +756,36 @@ def evaluate_and_log(ticker: str, signal: Optional[TradeSignal], yes_ask: Option
                         if pairs < 1:
                             continue
                         realized_price = round(fill.avg_price_cents)
+                        # find_max_arbitrage_size already summed both legs'
+                        # real fees at their own fill prices — reuse that
+                        # exact number. It can't be recovered later from the
+                        # stored combined pair price (one number, two
+                        # orders, non-linear formula), so storing it now is
+                        # the only way settlement charges the true fee
+                        # rather than fees.entry_fee_cents's conservative
+                        # even-split estimate.
+                        fee_paid = fill.fee_cents
+                        if pairs < fill.contracts_fillable:
+                            # Dollar cap trimmed the size below what the
+                            # search priced — scale the fee down with it
+                            # rather than charging the untrimmed amount.
+                            fee_paid = round(fill.fee_cents * pairs / fill.contracts_fillable)
                     else:
                         # No book data this cycle -- fall back to the
                         # original single-pair behavior exactly as before.
                         pairs, realized_price = 1, candidate.price_cents
+                        # Two separate orders at the two quoted prices —
+                        # the per-order formula applied to each, never to
+                        # their sum.
+                        fee_paid = (fees.taker_fee_cents(pairs, yes_ask) +
+                                    fees.taker_fee_cents(pairs, no_ask))
 
                     storage.log_shadow_trade(name, ticker, "both", pairs, realized_price,
                                               model_probability=None, station_code=station_code, measure=measure,
                                               rationale=candidate.rationale, event_ticker=event_ticker,
                                               hours_until_close_at_decision=hours_until_close,
-                                              bot_version=bot_version)
+                                              bot_version=bot_version,
+                                              fee_cents_paid=fee_paid)
                     rm.record_fill(cost_cents=pairs * realized_price)
             continue
 
@@ -1181,6 +1201,11 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict],
             realized_price = round(leg_fill.avg_price_cents)
             storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, realized_price,
                                       station_code=station_code, measure=measure,
+                                      # Each leg is its own real order at its own
+                                      # price, so each row carries its own real fee
+                                      # — exactly the per-leg sum find_max_bracket_size
+                                      # already used to decide this set was profitable.
+                                      fee_cents_paid=fees.taker_fee_cents(sets, realized_price),
                                       rationale=f"bracket set of {len(included)} legs (of {len(included) + skipped_count} "
                                                 f"total, {skipped_count} skipped as near-certain), depth-walked, "
                                                 f"worst-case payout {worst_case_payout}c/set")
@@ -1210,6 +1235,7 @@ def evaluate_bracket_set(event_ticker: str, markets: list[dict],
         price = no_ask if direction == "no" else yes_ask
         storage.log_shadow_trade("bracket_arbitrage", ticker, direction, sets, price,
                                   station_code=station_code, measure=measure,
+                                  fee_cents_paid=fees.taker_fee_cents(sets, price),
                                   rationale=f"bracket set of {len(included)} legs (of {len(included) + skipped_count} "
                                             f"total, {skipped_count} skipped as near-certain), flat top-of-book "
                                             f"pricing (no depth data this cycle), worst-case payout {worst_case_payout}c/set")
@@ -1245,9 +1271,19 @@ def settle_bracket_arbitrage(ticker_results: dict[str, tuple[bool, "str | None"]
 
         payout = trade["precomputed_payout_cents"] or 0
         cost = trade["price_cents"] * trade["count"]
-        pnl_cents = payout - cost
+        # A legacy row's price_cents is the COMBINED multi-leg set price,
+        # so the single-order fee formula can't be applied to it directly
+        # (it's non-linear — see evaluate_bracket_set's fallback path).
+        # The real per-leg fee sum was never stored on these rows, so this
+        # charges whatever fee_cents_paid holds and nothing if it's NULL,
+        # rather than inventing a number from a price that isn't a real
+        # contract price. Only affects pre-refactor rows; current per-leg
+        # rows settle through settle() above with their own real fees.
+        fee_cents = int(trade["fee_cents_paid"] or 0)
+        pnl_cents = payout - cost - fee_cents
 
-        storage.settle_shadow_trade(trade["id"], pnl_cents > 0, pnl_cents)
+        storage.settle_shadow_trade(trade["id"], pnl_cents > 0, pnl_cents,
+                                     total_fee_cents=fee_cents)
         rm = engines.get("bracket_arbitrage")
         if rm:
             rm.record_settlement(pnl_cents)
@@ -1300,8 +1336,14 @@ def check_bracket_arbitrage_offload() -> int:
         if current_value >= floor or current_value >= trade["price_cents"]:
             continue  # not decaying, or not decayed enough yet — leave it
 
-        pnl_cents = (current_value - trade["price_cents"]) * trade["count"]
-        storage.close_shadow_trade_sold(trade["id"], pnl_cents)
+        # Same two-order fee reality as check_swing_exits() above: an
+        # offloaded leg pays to get in and pays again to get out, and the
+        # residual cents being salvaged here are small enough that the
+        # exit fee can genuinely decide whether the salvage was worth it.
+        fee_cents = (fees.entry_fee_for_row(trade) +
+                     fees.exit_fee_cents(trade["count"], current_value))
+        pnl_cents = (current_value - trade["price_cents"]) * trade["count"] - fee_cents
+        storage.close_shadow_trade_sold(trade["id"], pnl_cents, total_fee_cents=fee_cents)
         rm = engines.get("bracket_arbitrage")
         if rm:
             rm.record_settlement(pnl_cents)
@@ -1338,8 +1380,15 @@ def check_swing_exits() -> int:
         if exit_price is None or exit_price < trade["exit_target_cents"]:
             continue
 
-        pnl_cents = (exit_price - trade["price_cents"]) * trade["count"]
-        storage.close_shadow_trade_sold(trade["id"], pnl_cents)
+        # Selling early is a SECOND taker order, so this position pays the
+        # fee twice — once entering, once exiting — unlike one held to
+        # settlement, which pays only the entry fee. That asymmetry is
+        # exactly the cost swing has to beat to justify exiting early, so
+        # modeling it is the whole point of charging it here.
+        fee_cents = (fees.entry_fee_for_row(trade) +
+                     fees.exit_fee_cents(trade["count"], exit_price))
+        pnl_cents = (exit_price - trade["price_cents"]) * trade["count"] - fee_cents
+        storage.close_shadow_trade_sold(trade["id"], pnl_cents, total_fee_cents=fee_cents)
         rm = engines.get("swing")
         if rm:
             rm.record_settlement(pnl_cents)
@@ -1382,13 +1431,22 @@ def settle(ticker_results: dict[str, tuple[bool, Optional[str]]]) -> int:
         if side == "both":
             # Arbitrage: guaranteed payout of 100c regardless of result,
             # cost was `price` (the combined yes_ask+no_ask paid).
-            pnl_cents = 100 - price
+            gross_pnl_cents = 100 - price
             won = True
         else:
             won = (side == result)
-            pnl_cents = (100 - price) * count if won else -price * count
+            gross_pnl_cents = (100 - price) * count if won else -price * count
 
-        storage.settle_shadow_trade(trade["id"], won, pnl_cents)
+        # Real Kalshi taker fees paid on the way in come out of the P&L —
+        # see settlement.settle_resolved_trades for the full reasoning.
+        # It matters even more here than it does for the main bot: the
+        # leaderboard ranks strategies against each other, and a fee-free
+        # P&L systematically flatters the strategies that place the most
+        # orders (favorites/always_trade/longshot) over the selective ones.
+        fee_cents = fees.entry_fee_for_row(trade)
+        pnl_cents = gross_pnl_cents - fee_cents
+
+        storage.settle_shadow_trade(trade["id"], won, pnl_cents, total_fee_cents=fee_cents)
         rm = engines.get(trade["strategy"])
         if rm:
             rm.record_settlement(pnl_cents)

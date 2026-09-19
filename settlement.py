@@ -15,6 +15,7 @@ import logging
 from kalshi_client import KalshiClient
 from risk_manager import RiskManager
 import calibration
+import fees
 import shadow
 import storage
 
@@ -65,9 +66,19 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
         price = trade["price_cents"]
         # Binary contract payout: winner gets 100c/contract, loser gets 0.
         # You already paid `price` cents/contract when you bought it.
-        pnl_cents = (100 - price) * count if won else -price * count
+        gross_pnl_cents = (100 - price) * count if won else -price * count
+        # ...and you also paid Kalshi's taker fee on the way IN, which is
+        # real money gone whichever way the market resolves. Kalshi charges
+        # nothing extra when a held contract settles, so a held-to-
+        # settlement position pays exactly this one fee. Leaving it out
+        # (which is what this did until now) makes every strategy's P&L
+        # read better than the same trades would have in a real account —
+        # and worse, it biases the comparison toward whichever strategies
+        # trade most often, since fees scale with order count, not edge.
+        fee_cents = fees.entry_fee_for_row(trade)
+        pnl_cents = gross_pnl_cents - fee_cents
 
-        storage.settle_trade(trade["id"], won, pnl_cents)
+        storage.settle_trade(trade["id"], won, pnl_cents, total_fee_cents=fee_cents)
         risk.record_settlement(pnl_cents)
 
         # Calibration tracks the YES-event probability consistently, regardless
@@ -81,7 +92,8 @@ def settle_resolved_trades(kalshi: KalshiClient, risk: RiskManager) -> int:
         )
 
         log.info(
-            f"Settled {ticker}: {'WON' if won else 'LOST'}, pnl={pnl_cents}c, "
+            f"Settled {ticker}: {'WON' if won else 'LOST'}, pnl={pnl_cents}c "
+            f"(gross {gross_pnl_cents}c - {fee_cents}c fees), "
             f"new bankroll={risk.state.bankroll_cents}c"
         )
         settled_count += 1

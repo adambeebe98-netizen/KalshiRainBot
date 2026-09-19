@@ -1,4 +1,7 @@
 .env
+.env.save
+.env.bak
+.env.*.save
 venv/
 *.db
 *.pem

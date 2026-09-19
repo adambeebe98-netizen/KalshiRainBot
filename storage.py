@@ -436,6 +436,21 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Every deliberate read of the held-out validation vault (see splits.py).
+-- The vault only means something if touching it is rare, intentional and
+-- countable: a result computed on vault data is only valid if it was the
+-- FIRST time that candidate ever saw the vault, and this table is the
+-- record that makes that claim checkable rather than remembered.
+-- Append-only, never updated, never cleaned up.
+CREATE TABLE IF NOT EXISTS vault_access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    caller TEXT NOT NULL,       -- file:line of the code that asked
+    reason TEXT NOT NULL,       -- supplied by the caller; required, non-empty
+    dataset TEXT NOT NULL,      -- which table was read
+    rows_returned INTEGER NOT NULL
+);
 """
 
 
@@ -480,6 +495,13 @@ def _migrate_add_columns(conn) -> None:
         "ALTER TABLE trades ADD COLUMN threshold_low_f REAL",
         "ALTER TABLE trades ADD COLUMN threshold_high_f REAL",
         "ALTER TABLE trades ADD COLUMN fee_cents_paid INTEGER",
+        # 1 once pnl_cents on this row has had real Kalshi fees deducted
+        # from it — NULL/0 means the row still carries the older, GROSS
+        # (fee-free) figure. Settlement sets it from now on; the one-time
+        # backfill in rederive_fees.py uses it to stay idempotent, so
+        # re-running that script can never double-charge a row.
+        "ALTER TABLE trades ADD COLUMN fees_applied_to_pnl INTEGER",
+        "ALTER TABLE shadow_trades ADD COLUMN fees_applied_to_pnl INTEGER",
         # historical_markets: settlement_source, threshold_description,
         # and confidence were extracted by rules_extractor all along but
         # discarded rather than stored -- added per explicit request,
@@ -622,11 +644,17 @@ def get_open_trades(mode: str | None = None) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def settle_trade(trade_id: int, won: bool, pnl_cents: int) -> None:
+def settle_trade(trade_id: int, won: bool, pnl_cents: int,
+                  total_fee_cents: int | None = None) -> None:
+    """pnl_cents is the NET figure — real Kalshi fees already deducted (see
+    settlement.settle_resolved_trades). total_fee_cents is what was
+    deducted, stored back on the row so "how much of the edge did fees
+    eat" stays answerable per-trade instead of needing a recomputation."""
     with get_conn() as conn:
         conn.execute(
-            "UPDATE trades SET status=?, settled_ts=?, pnl_cents=? WHERE id=?",
-            ("won" if won else "lost", int(time.time()), pnl_cents, trade_id),
+            "UPDATE trades SET status=?, settled_ts=?, pnl_cents=?, "
+            "fee_cents_paid=COALESCE(?, fee_cents_paid), fees_applied_to_pnl=1 WHERE id=?",
+            ("won" if won else "lost", int(time.time()), pnl_cents, total_fee_cents, trade_id),
         )
 
 
@@ -646,7 +674,7 @@ def load_last_bankroll(default_cents: int) -> int:
     """
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT bankroll_cents FROM bankroll_snapshots ORDER BY ts DESC LIMIT 1"
+            "SELECT bankroll_cents FROM bankroll_snapshots ORDER BY ts DESC, id DESC LIMIT 1"
         ).fetchone()
         return row[0] if row else default_cents
 
@@ -771,21 +799,32 @@ def get_open_shadow_trades(strategy: str | None = None) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def settle_shadow_trade(trade_id: int, won: bool, pnl_cents: int) -> None:
+def settle_shadow_trade(trade_id: int, won: bool, pnl_cents: int,
+                         total_fee_cents: int | None = None) -> None:
+    """Same contract as settle_trade(): pnl_cents is NET of real fees, and
+    total_fee_cents (when given) records what was deducted."""
     with get_conn() as conn:
         conn.execute(
-            "UPDATE shadow_trades SET status=?, settled_ts=?, pnl_cents=? WHERE id=?",
-            ("won" if won else "lost", int(time.time()), pnl_cents, trade_id),
+            "UPDATE shadow_trades SET status=?, settled_ts=?, pnl_cents=?, "
+            "fee_cents_paid=COALESCE(?, fee_cents_paid), fees_applied_to_pnl=1 WHERE id=?",
+            ("won" if won else "lost", int(time.time()), pnl_cents, total_fee_cents, trade_id),
         )
 
 
-def close_shadow_trade_sold(trade_id: int, pnl_cents: int) -> None:
+def close_shadow_trade_sold(trade_id: int, pnl_cents: int,
+                             total_fee_cents: int | None = None) -> None:
     """Swing strategy only: position closed by selling before resolution,
-    not by the market settling. Counted as a 'win' in summaries when profitable."""
+    not by the market settling. Counted as a 'win' in summaries when profitable.
+
+    pnl_cents is NET of fees here too — and an early exit is charged
+    TWICE (entry order + exit order), unlike a position held to
+    settlement, so total_fee_cents covers both legs (see
+    fees.exit_fee_cents)."""
     with get_conn() as conn:
         conn.execute(
-            "UPDATE shadow_trades SET status='sold', settled_ts=?, pnl_cents=? WHERE id=?",
-            (int(time.time()), pnl_cents, trade_id),
+            "UPDATE shadow_trades SET status='sold', settled_ts=?, pnl_cents=?, "
+            "fee_cents_paid=COALESCE(?, fee_cents_paid), fees_applied_to_pnl=1 WHERE id=?",
+            (int(time.time()), pnl_cents, total_fee_cents, trade_id),
         )
 
 
@@ -927,7 +966,7 @@ def snapshot_shadow_bankroll(strategy: str, bankroll_cents: int) -> None:
 def load_last_shadow_bankroll(strategy: str, default_cents: int) -> int:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC LIMIT 1",
+            "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC, id DESC LIMIT 1",
             (strategy,),
         ).fetchone()
         return row[0] if row else default_cents
@@ -1168,7 +1207,7 @@ def get_shadow_summary() -> list[dict]:
             ).fetchone()
             current_value_cents, _ = _mark_open_positions_to_market(conn, s)
             bankroll_row = conn.execute(
-                "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC LIMIT 1", (s,)
+                "SELECT bankroll_cents FROM shadow_bankroll_snapshots WHERE strategy=? ORDER BY ts DESC, id DESC LIMIT 1", (s,)
             ).fetchone()
             first_ts_row = conn.execute(
                 "SELECT MIN(ts) as first_ts FROM shadow_bankroll_snapshots WHERE strategy=?", (s,)

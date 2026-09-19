@@ -16,6 +16,7 @@ from tests.helpers import use_temp_db, clear_tables
 
 use_temp_db()
 
+import fees  # noqa: E402
 import storage  # noqa: E402
 import shadow  # noqa: E402
 from risk_manager import RiskManager, RiskState  # noqa: E402
@@ -48,8 +49,11 @@ class TestSettleResolvedTrades(unittest.TestCase):
         with storage.get_conn() as conn:
             row = conn.execute("SELECT status, pnl_cents FROM trades WHERE ticker='T1'").fetchone()
         self.assertEqual(row[0], "won")
-        self.assertEqual(row[1], (100 - 40) * 10)  # 600
-        self.assertEqual(self.risk.state.bankroll_cents, 50000 + 600)
+        # NET of the real entry fee, not the gross 600c — the taker fee was
+        # really paid to open this position and never comes back.
+        fee = fees.taker_fee_cents(10, 40)
+        self.assertEqual(row[1], (100 - 40) * 10 - fee)
+        self.assertEqual(self.risk.state.bankroll_cents, 50000 + 600 - fee)
 
     def test_lost_trade_computes_correct_pnl(self):
         storage.log_trade("T2", "yes", 10, 40, "paper", None)
@@ -58,7 +62,25 @@ class TestSettleResolvedTrades(unittest.TestCase):
         with storage.get_conn() as conn:
             row = conn.execute("SELECT status, pnl_cents FROM trades WHERE ticker='T2'").fetchone()
         self.assertEqual(row[0], "lost")
-        self.assertEqual(row[1], -40 * 10)  # -400
+        # A loser pays the fee too — it's charged on the way in, so the
+        # loss is bigger than the contracts' cost alone.
+        self.assertEqual(row[1], -40 * 10 - fees.taker_fee_cents(10, 40))
+
+    def test_settlement_charges_the_real_recorded_fee_over_the_estimate(self):
+        """When the fee really charged at decision time was stored on the
+        trade (bot.py passes find_max_profitable_size's own number), that
+        exact figure is what settlement deducts — the estimate is only a
+        fallback for rows that predate the column being filled in."""
+        storage.log_trade("T5", "yes", 10, 40, "paper", None, fee_cents_paid=999)
+        kc = self._fake_kalshi({"T5": (True, "yes")})
+        settlement.settle_resolved_trades(kc, self.risk)
+        with storage.get_conn() as conn:
+            row = conn.execute(
+                "SELECT pnl_cents, fee_cents_paid, fees_applied_to_pnl FROM trades "
+                "WHERE ticker='T5'").fetchone()
+        self.assertEqual(row[0], (100 - 40) * 10 - 999)
+        self.assertEqual(row[1], 999)
+        self.assertEqual(row[2], 1)  # marked so rederive_fees.py never re-charges it
 
     def test_unsettled_market_is_left_open(self):
         storage.log_trade("T3", "yes", 10, 40, "paper", None)

@@ -22,6 +22,14 @@ class FillEstimate:
     total_cost_cents: int
     avg_price_cents: float
     exhausted_book: bool  # True if we ran out of visible depth before filling the request
+    # The real total fee for this fill, already computed by whichever
+    # sizing search produced it. Carried out on the estimate so callers can
+    # STORE the true number per-trade rather than re-deriving it from the
+    # combined avg_price_cents — which is impossible to do correctly for a
+    # multi-order fill (arbitrage pairs, bracket sets), since the fee
+    # formula is per-order and non-linear. estimate_fill() alone knows
+    # nothing about fees and leaves this at 0.
+    fee_cents: int = 0
 
 
 def implied_ask_levels(opposite_side_bids: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -132,6 +140,7 @@ def find_max_bracket_size(leg_ask_levels: list[list[tuple[int, int]]], fee_fn,
                 total_cost_cents=total_cost,
                 avg_price_cents=total_cost / size,  # combined avg cost per set across all legs
                 exhausted_book=False,
+                fee_cents=fee_cents,  # real per-leg fees summed, not a re-derivation
             )
         else:
             break
@@ -188,6 +197,7 @@ def find_max_arbitrage_size(yes_ask_levels: list[tuple[int, int]], no_ask_levels
                 total_cost_cents=total_cost,
                 avg_price_cents=total_cost / size,  # combined yes+no avg cost per pair
                 exhausted_book=False,
+                fee_cents=fee_cents,  # both legs' real fees summed, not a re-derivation
             )
         else:
             break  # this size no longer profitable -- bigger will only be worse
@@ -269,6 +279,7 @@ def find_max_profitable_size(ask_levels: list[tuple[int, int]], fee_fn, model_pr
         net_edge_total = expected_value_cents * fill.contracts_fillable - fee_cents
 
         if net_edge_total >= min_net_edge_cents:
+            fill.fee_cents = fee_cents
             best = fill  # this size still clears the bar — keep it, try bigger
         else:
             break  # this size no longer profitable — bigger will only be worse
