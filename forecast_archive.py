@@ -190,7 +190,18 @@ def fetch_forecasts(station: str, lat: float, lon: float,
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "timezone": "UTC"})
     resp.raise_for_status()
-    hourly = resp.json().get("hourly", {})
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        # Open-Meteo answers overload with an HTML error page and a 200,
+        # so raise_for_status does not catch it. Raising with a snippet
+        # beats a bare JSONDecodeError three stations into a backfill.
+        raise RuntimeError(
+            f"non-JSON response from {PREVIOUS_RUNS} "
+            f"(status {resp.status_code}): {resp.text[:160]!r}") from exc
+    if "error" in body:
+        raise RuntimeError(f"API error: {body.get('reason', body['error'])}")
+    hourly = body.get("hourly", {})
     times = hourly.get("time", [])
     sid = weather_archive.asos_id(station)
     out = []
