@@ -478,3 +478,111 @@ Flagged rather than silently worked around:
 Out of scope for this piece: the tick-era execution model (no data until
 collection resumes), any actual strategy search, and anything that reads
 the vault.
+
+---
+
+## 14. Amendment — 2026-09-19, after `analysis/`
+
+Three findings from `analysis/` bear directly on this design. Two confirm
+it; one changes a premise behind §3.3.
+
+### 14.1 The prediction target is now defined, and it is not what it looks like
+
+`analysis/trace_test.py` joins settled NYC daily-rain markets to the NWS
+CLI archive. The CLI `precip` field separates outcomes with no exceptions
+across 478 markets: `0.00` → NO (268/268), `T` → **YES** (34/34), a number
+→ YES (176/176).
+
+So "strictly greater than 0 inches" **includes trace**. Consequently:
+
+- P(measurable rain, ≥0.01") = **36.9%**
+- P(contract settles YES) = **44.0%**
+
+A model trained on measurable rainfall predicts an event 7 points rarer
+than the one being paid on, on every market, in the same direction. Any
+label function in this harness must be defined against the settlement
+product, never against a physical threshold that seems equivalent.
+
+### 14.2 Baselines are harder than §8 assumes
+
+`analysis/horizon_calibration.py`, NYC daily rain:
+
+| Horizon | Market Brier | Constant Brier | Coverage |
+|---|---|---|---|
+| 6h | 0.0548 | 0.2463 | 100% |
+| 12h | 0.0984 | 0.2464 | 100% |
+| 24h | **0.1391** | 0.2469 | 98% |
+| 36h | 0.1283 | 0.2459 | 74% |
+
+The market beats a constant predictor decisively at every horizon. §7's
+concern that a global base rate is a weak baseline is correct, but the
+market baseline is strong — 0.1391 at 24h is the number to beat, and it
+should be reported per-horizon rather than pooled.
+
+Also structural, and it constrains fold generation: **no price data exists
+beyond ~36h before close.** Consistent with the 39h median lifetime in §1,
+but it means the tradeable window is ~36 hours and a candidate that needs
+a longer lead time has nothing to trade, not merely a worse forecast.
+
+Separately, a hypothesis for the harness rather than a finding: the market
+overprices YES at every horizon (+4.6 to +10.1 points, largest at 24h).
+One station, 468 autocorrelated markets, four horizons examined. It is
+recorded here so that when it is eventually tested, the trial count
+already includes the look that produced it.
+
+### 14.3 §3.3's premise is fixable, and should be fixed rather than accepted
+
+§3.3 concludes that weather-feature candidates cannot be honestly
+evaluated on the archive, and restricts v1 to price/structure. That is
+right **for the archive as it exists** — Open-Meteo backfill, no issue
+time, revisions silently dropped.
+
+But the constraint is a property of the chosen source, not of history.
+Timestamped alternatives exist:
+
+- **Observations.** IEM's CLI archive (`/json/cli.py`) returns a `product`
+  identifier of the form `202501020709-KOKX-CDUS41-CLINYC` — the issuing
+  WFO and the product's issuance time, to the minute. Confirmed in
+  `analysis/trace_test.py`. Availability is therefore *verifiable*, not
+  declared. The same holds for IEM's ASOS archive, which is also the
+  instrument these contracts settle on, unlike a model grid cell.
+- **Forecasts as issued.** Verified 2026-09-19 against Open-Meteo's own
+  documentation, and the distinction matters more than expected. Three
+  different products, only two of which are safe:
+
+  | API | What it returns | Safe? |
+  |---|---|---|
+  | **Historical Forecast** | Successive runs stitched into one continuous series, taking each run's *first few hours* | **No** |
+  | **Single Runs** | One complete model run, selected by initialisation time (`run=2025-09-01T00:00`) | **Yes** |
+  | **Previous Runs** | Fixed lead-time offsets, 1–7 days ahead | **Yes** |
+
+  The Historical Forecast API is the trap. By design it prioritises
+  accuracy of past conditions over forecast reproducibility, so what it
+  returns for a past hour is effectively an analysis — which is precisely
+  the near-zero-lead-time nowcast §3.3 warns leaks the answer. It is also
+  the most obvious endpoint to reach for, and plausibly what produced the
+  existing archive.
+
+  **Single Runs** is the correct source: request the run initialised
+  before the decision time and take the value at the target hour, so lead
+  time is explicit and availability is verifiable from the run timestamp.
+  Coverage begins around 2021–2022 depending on model, which spans the
+  archive (2024-09 → 2026-07). Precipitation is available hourly.
+
+  So §3.3 is fixable — but only via Single Runs or Previous Runs. If the
+  rebuild uses Historical Forecast, the archive is just as contaminated as
+  it is now, and less obviously so.
+
+Recommended amendment to the build order: keep §13 exactly as written —
+v1 ships price/structure only, because that is honest today. But treat
+"rebuild the weather archive from timestamped sources" as the immediate
+next piece rather than as a limitation to live with, because the whole
+project is a weather model and §3.3 currently says the harness cannot
+evaluate one.
+
+One caution carried forward: the first version of this amendment named
+the wrong Open-Meteo endpoint, and the wrong one fails silently — it
+returns plausible numbers that happen to contain the answer. Whatever
+rebuilds the weather archive should assert the lead time of every row it
+writes, so that using an analysis in place of a forecast is a crash
+rather than a quietly excellent backtest.
