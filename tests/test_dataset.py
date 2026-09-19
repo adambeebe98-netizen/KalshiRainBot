@@ -229,6 +229,127 @@ class CandleRows(unittest.TestCase):
         self.assertTrue(all(not r["in_game"] for r in rows))
 
 
+class BuildState(unittest.TestCase):
+    """Score and clock, the ground truth spread/total markets need.
+
+    ESPN's own spread and total probabilities cannot serve these: it
+    quotes one whole-number line (7.0) while Kalshi lists a ladder of
+    half-points (6.5, 7.5, ...), so they are different contracts. Across
+    294 games the lines coincided in 44. Score and clock answer every
+    line at once.
+    """
+
+    HOME = {"yes_is_home": True, "event_id": "E"}
+    AWAY = {"yes_is_home": False, "event_id": "E"}
+
+    def _plays(self):
+        return [
+            {"id": "a", "wallclock": "2026-01-18T20:30:00Z",
+             "away_score": 0, "home_score": 7, "period": 1,
+             "clock_seconds": 600},
+            {"id": "b", "wallclock": "2026-01-18T22:00:00Z",
+             "away_score": 10, "home_score": 7, "period": 3,
+             "clock_seconds": 200},
+        ]
+
+    def test_margin_is_oriented_to_the_home_contract(self):
+        s = ds.build_state(self._plays(), self.HOME)
+        v = s.as_of(ds.to_epoch("2026-01-18T20:45:00Z"))
+        self.assertEqual(v["margin_for_yes"], 7)
+        self.assertEqual(v["total_score"], 7)
+
+    def test_margin_flips_for_the_away_contract(self):
+        s = ds.build_state(self._plays(), self.AWAY)
+        v = s.as_of(ds.to_epoch("2026-01-18T22:30:00Z"))
+        self.assertEqual(v["margin_for_yes"], 3, "away leads 10-7")
+
+    def test_total_score_is_side_independent(self):
+        for fixture in (self.HOME, self.AWAY):
+            s = ds.build_state(self._plays(), fixture)
+            v = s.as_of(ds.to_epoch("2026-01-18T22:30:00Z"))
+            self.assertEqual(v["total_score"], 17)
+
+    def test_margin_is_none_when_there_is_no_side(self):
+        """A total belongs to the game, not a team."""
+        s = ds.build_state(self._plays(), {"yes_is_home": None})
+        v = s.as_of(ds.to_epoch("2026-01-18T22:30:00Z"))
+        self.assertIsNone(v["margin_for_yes"])
+        self.assertEqual(v["total_score"], 17)
+
+    def test_reads_the_mlb_field_spelling_too(self):
+        plays = [{"id": "a", "wallclock": "2026-01-18T20:30:00Z",
+                  "awayScore": 2, "homeScore": 5,
+                  "period": {"number": 4}}]
+        s = ds.build_state(plays, self.HOME)
+        v = s.as_of(ds.to_epoch("2026-01-18T21:00:00Z"))
+        self.assertEqual(v["margin_for_yes"], 3)
+        self.assertEqual(v["period"], 4)
+
+    def test_state_never_reaches_forward(self):
+        s = ds.build_state(self._plays(), self.HOME)
+        # One second before the 10-7 play; must still read 0-7.
+        v = s.as_of(ds.to_epoch("2026-01-18T21:59:59Z"))
+        self.assertEqual(v["away_score"], 0)
+
+    def test_plays_without_a_clock_are_skipped(self):
+        plays = [{"id": "a", "wallclock": None,
+                  "away_score": 0, "home_score": 7}]
+        self.assertEqual(len(ds.build_state(plays, self.HOME)), 0)
+
+
+class RowsCarryState(unittest.TestCase):
+
+    FIXTURE = {"yes_is_home": True, "event_id": "E1",
+               "kind": "spread", "line": 3.5}
+
+    def test_state_columns_are_populated_and_point_in_time(self):
+        market = {
+            "ticker": "KXNFLSPREAD-25AUG21NENYG-NE3",
+            "result": "yes",
+            "close_time": "2026-01-18T23:40:00Z",
+            "candles_hourly": [
+                {"end_period_ts": ds.to_epoch("2026-01-18T19:00:00Z"),
+                 "price": {"close": "0.5000"}},
+                {"end_period_ts": ds.to_epoch("2026-01-18T22:30:00Z"),
+                 "price": {"close": "0.7000"}},
+            ],
+        }
+        plays = [{"id": "a", "wallclock": "2026-01-18T21:00:00Z",
+                  "away_score": 3, "home_score": 14, "period": 2}]
+        state = ds.build_state(plays, self.FIXTURE)
+        rows = ds.candle_rows(market, ds.ProbabilityCurve([]), self.FIXTURE,
+                              "KXNFLSPREAD", state=state)
+        by_ts = {r["ts"]: r for r in rows}
+
+        pre = by_ts[ds.to_epoch("2026-01-18T19:00:00Z")]
+        self.assertIsNone(pre["margin_for_yes"], "no play had happened")
+        self.assertFalse(pre["in_game"])
+
+        live = by_ts[ds.to_epoch("2026-01-18T22:30:00Z")]
+        self.assertEqual(live["margin_for_yes"], 11)
+        self.assertEqual(live["total_score"], 17)
+        self.assertTrue(live["in_game"])
+        self.assertAlmostEqual(live["market_line"], 3.5)
+        self.assertEqual(live["market_kind"], "spread")
+
+    def test_espn_spread_probability_is_not_called_p_independent(self):
+        """It answers a different line, so it must not be mistaken for
+        this market's estimate."""
+        market = {"ticker": "T", "result": "yes",
+                  "close_time": "2026-01-18T23:40:00Z",
+                  "candles_hourly": [
+                      {"end_period_ts": ds.to_epoch("2026-01-18T22:00:00Z"),
+                       "price": {"close": "0.70"}}]}
+        plays = [{"id": "a", "wallclock": "2026-01-18T20:00:00Z"}]
+        points = [{"playId": "a", "home_win_pct": 0.8,
+                   "spread_cover_home": 0.62}]
+        curve = ds.build_curve(plays, points, self.FIXTURE)
+        rows = ds.candle_rows(market, curve, self.FIXTURE, "KXNFLSPREAD")
+        self.assertAlmostEqual(rows[0]["espn_spread_cover_home"], 0.62)
+        self.assertAlmostEqual(rows[0]["p_independent"], 0.8,
+                               msg="p_independent stays the moneyline")
+
+
 class Edge(unittest.TestCase):
 
     def test_positive_when_the_independent_source_is_higher(self):

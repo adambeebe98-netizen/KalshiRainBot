@@ -65,10 +65,15 @@ def to_epoch(value) -> int | None:
 
 
 class ProbabilityCurve:
-    """An ESPN win-probability curve placed on a real clock.
+    """Any time series answering "what was known as of t".
 
-    Holds (timestamp, probabilities) sorted by time, and answers "what
-    was the estimate as of t" by binary search -- strictly backwards.
+    Holds (timestamp, value) sorted by time and answers by binary
+    search, strictly backwards. Used for the ESPN win-probability curve
+    and for game state, which need exactly the same discipline: a value
+    from later in the game is the whole failure mode.
+
+    (The name predates the second use and is kept so callers do not
+    churn; GameState below is an alias that reads correctly.)
     """
 
     def __init__(self, points: list[tuple[int, dict]]):
@@ -97,6 +102,65 @@ class ProbabilityCurve:
         if idx < 0:
             return None
         return self._values[idx]
+
+
+GameState = ProbabilityCurve
+
+
+def build_state(plays: list[dict], fixture: dict) -> ProbabilityCurve:
+    """Score and clock over time, from the plays themselves.
+
+    THIS IS THE GROUND TRUTH FOR SPREAD AND TOTAL MARKETS, and ESPN's
+    own spread/total probabilities are not.
+
+    Kalshi lists a LADDER of lines per game -- 2.5, 3.5, 6.5, 7.5, 9.5
+    and on, a median of nine and up to twenty-three. ESPN publishes a
+    probability against exactly one line, its own posted spread, and
+    quotes it as a whole number (7.0) where Kalshi quotes half-points
+    (6.5, 7.5) precisely so a push is impossible. They are different
+    contracts: across 294 games the lines coincided in 44.
+
+    So borrowing spreadCoverProbHome for a "wins by over 3.5" market
+    would pair a price with a probability about a different question.
+    The score and the clock, however, answer every line at once, and a
+    model can learn P(margin > 3.5 | score, time remaining) from them.
+
+    Field names differ between the two feeds -- the MLB site API uses
+    awayScore/homeScore, the NFL core API away_score/home_score -- so
+    both spellings are read.
+    """
+    points: list[tuple[int, dict]] = []
+    for play in plays or ():
+        stamp = to_epoch(play.get("wallclock"))
+        if stamp is None:
+            continue
+        away = play.get("away_score", play.get("awayScore"))
+        home = play.get("home_score", play.get("homeScore"))
+        if away is None or home is None:
+            continue
+        period = play.get("period")
+        if isinstance(period, dict):
+            period = period.get("number")
+        try:
+            away, home = int(away), int(home)
+        except (TypeError, ValueError):
+            continue
+        # Oriented to the contract: "our" side is whichever the market
+        # pays YES on, so a margin is positive when YES is ahead.
+        yes_is_home = fixture.get("yes_is_home")
+        if yes_is_home is None:
+            margin = None
+        else:
+            margin = (home - away) if yes_is_home else (away - home)
+        points.append((stamp, {
+            "away_score": away,
+            "home_score": home,
+            "total_score": away + home,
+            "margin_for_yes": margin,
+            "period": period,
+            "clock_seconds": play.get("clock_seconds"),
+        }))
+    return ProbabilityCurve(points)
 
 
 def _play_clock(plays: Iterable[dict]) -> dict[str, int]:
@@ -155,7 +219,8 @@ def build_curve(plays: list[dict], points: list[dict],
 
 def candle_rows(market: dict, curve: ProbabilityCurve,
                 fixture: dict, series: str,
-                include_pregame: bool = True) -> list[dict]:
+                include_pregame: bool = True,
+                state: ProbabilityCurve | None = None) -> list[dict]:
     """One row per candle, carrying only what was known at its close.
 
     Hourly and minute candles are both emitted, tagged by resolution.
@@ -177,7 +242,8 @@ def candle_rows(market: dict, curve: ProbabilityCurve,
             if t is None:
                 continue
             estimate = curve.as_of(t)
-            if estimate is None and not include_pregame:
+            now = state.as_of(t) if state is not None else None
+            if estimate is None and now is None and not include_pregame:
                 continue
 
             price = mj.candle_price(candle)
@@ -209,10 +275,25 @@ def candle_rows(market: dict, curve: ProbabilityCurve,
                 # None where the game had not started. Filling this with
                 # the opening estimate would hand every pregame row a
                 # number nobody had.
+                # The moneyline estimate. Correct for winner markets and
+                # NOT an answer for a spread or total, whose line ESPN
+                # does not quote -- see build_state().
                 "p_independent": (estimate or {}).get("p_yes"),
-                "spread_cover_home": (estimate or {}).get("spread_cover_home"),
-                "total_over": (estimate or {}).get("total_over"),
-                "in_game": estimate is not None,
+                # Kept raw and clearly named, so nothing mistakes them
+                # for an estimate at THIS market's line.
+                "espn_spread_cover_home": (estimate or {}).get(
+                    "spread_cover_home"),
+                "espn_total_over": (estimate or {}).get("total_over"),
+                # Ground truth that answers every line at once.
+                "away_score": (now or {}).get("away_score"),
+                "home_score": (now or {}).get("home_score"),
+                "total_score": (now or {}).get("total_score"),
+                "margin_for_yes": (now or {}).get("margin_for_yes"),
+                "period": (now or {}).get("period"),
+                "clock_seconds": (now or {}).get("clock_seconds"),
+                "market_line": fixture.get("line"),
+                "market_kind": fixture.get("kind"),
+                "in_game": estimate is not None or now is not None,
                 "yes_is_home": fixture.get("yes_is_home"),
                 "label": label,
             })
