@@ -216,6 +216,7 @@ async def run_listener() -> None:
 
                 last_rediscover = time.time()
                 ticks_written = 0
+                ticks_dropped = 0
                 last_log = time.time()
 
                 while True:
@@ -251,19 +252,46 @@ async def run_listener() -> None:
                                 log.info("New weather market via lifecycle event, subscribed: %s", tick.ticker)
 
                         if tick is not None:
-                            storage.save_realtime_tick(
-                                ticker=tick.ticker, channel=tick.channel, ts=tick.ts,
-                                received_ts=received_ts, yes_price_cents=tick.yes_price_cents,
-                                yes_bid_cents=tick.yes_bid_cents, yes_ask_cents=tick.yes_ask_cents,
-                                volume=tick.volume, open_interest=tick.open_interest, raw_json=raw,
-                            )
-                            ticks_written += 1
+                            try:
+                                # Off the event loop on purpose. get_conn sets
+                                # busy_timeout=5000, so a contended write can
+                                # block for up to five seconds -- and a blocked
+                                # event loop can't answer the connection's own
+                                # keepalive ping, which is exactly how the
+                                # exchange-wide-subscribe bug killed us before.
+                                # Same failure mode, different cause.
+                                await asyncio.to_thread(
+                                    storage.save_realtime_tick,
+                                    ticker=tick.ticker, channel=tick.channel, ts=tick.ts,
+                                    received_ts=received_ts, yes_price_cents=tick.yes_price_cents,
+                                    yes_bid_cents=tick.yes_bid_cents, yes_ask_cents=tick.yes_ask_cents,
+                                    volume=tick.volume, open_interest=tick.open_interest, raw_json=raw,
+                                )
+                            except Exception:
+                                # A failed write loses this one tick. Letting it
+                                # propagate loses the whole connection -- the
+                                # outer handler reconnects and resubscribes all
+                                # ~770 markets, so every feed goes dark for the
+                                # reconnect delay plus resubscribe time.
+                                # CONFIRMED LIVE 2026-09-19 00:49:05: a single
+                                # "database is locked" inside save_realtime_tick
+                                # tore the listener down 24s after startup.
+                                # One row is the cheaper loss by orders of
+                                # magnitude, so swallow it and keep reading.
+                                ticks_dropped += 1
+                                log.warning(
+                                    "Dropped tick for %s (%d dropped this window)",
+                                    tick.ticker, ticks_dropped, exc_info=True,
+                                )
+                            else:
+                                ticks_written += 1
 
                     now = time.time()
                     if now - last_log > 300:
-                        log.info("%d ticks written in the last 5 min, tracking %d markets",
-                                  ticks_written, len(tracked))
+                        log.info("%d ticks written, %d dropped in the last 5 min, tracking %d markets",
+                                  ticks_written, ticks_dropped, len(tracked))
                         ticks_written = 0
+                        ticks_dropped = 0
                         last_log = now
 
                     if now - last_rediscover > REDISCOVER_INTERVAL_SECONDS:

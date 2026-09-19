@@ -1718,15 +1718,33 @@ def save_realtime_tick(ticker: str, channel: str, ts: int, received_ts: int,
     batched, since realtime_kalshi_ws.py is a long-running listener
     writing as messages arrive rather than a batch job. No INSERT OR
     IGNORE here on purpose -- see the table's own comment for why a
-    UNIQUE constraint would be real data loss for this table."""
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO realtime_ticks "
-            "(ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents, "
-            "yes_ask_cents, volume, open_interest, raw_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents,
-             yes_ask_cents, volume, open_interest, raw_json),
-        )
+    UNIQUE constraint would be real data loss for this table.
+
+    Retries on lock contention rather than giving up on the row. WAL plus
+    busy_timeout absorbs nearly all of it, but this writes ~7 rows/sec
+    against a file the trading bot writes too, so the occasional loser is
+    expected rather than exceptional. The caller runs this in a worker
+    thread, so sleeping here costs nothing but this one row's latency."""
+    last_err: sqlite3.OperationalError | None = None
+    for attempt in range(3):
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO realtime_ticks "
+                    "(ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents, "
+                    "yes_ask_cents, volume, open_interest, raw_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (ticker, channel, ts, received_ts, yes_price_cents, yes_bid_cents,
+                     yes_ask_cents, volume, open_interest, raw_json),
+                )
+            return
+        except sqlite3.OperationalError as exc:
+            # Only lock contention is worth retrying; a schema or disk error
+            # will fail identically every time and should surface at once.
+            if "locked" not in str(exc).lower():
+                raise
+            last_err = exc
+            time.sleep(0.2 * (attempt + 1))
+    raise last_err
 
 
 def save_realtime_weather_obs(station_code: str, ts: str, received_ts: int,
