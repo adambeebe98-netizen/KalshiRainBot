@@ -60,10 +60,32 @@ def _encode(received_ts: int, raw: str) -> str:
     otherwise. The fallback escapes rather than strips, so nothing is
     lost; the record simply carries its message as a string.
     """
-    stripped = raw.lstrip()
-    if stripped[:1] in ("{", "[") and "\n" not in raw and "\r" not in raw:
-        return '{"r":%d,"m":%s}' % (received_ts, raw)
+    # Surrounding whitespace is framing, not data: Kalshi's messages arrive
+    # with a trailing newline, and keeping it forced every record down the
+    # escaped-string path -- correct, but it turns a nested object into a
+    # string that every reader then has to parse again.
+    stripped = raw.strip()
+    if (stripped[:1] in ("{", "[")
+            and "\n" not in stripped and "\r" not in stripped):
+        return '{"r":%d,"m":%s}' % (received_ts, stripped)
     return json.dumps({"r": received_ts, "m": raw}, separators=(",", ":"))
+
+
+def message_of(record: dict):
+    """The message from an archive record, as a dict where possible.
+
+    The archive holds both forms: records written verbatim carry a nested
+    object, and records that fell back to the escaped-string path carry a
+    string. Both are valid and both exist in the files, so readers should
+    go through here rather than assuming either.
+    """
+    msg = record.get("m")
+    if isinstance(msg, str):
+        try:
+            return json.loads(msg)
+        except ValueError:
+            return msg
+    return msg
 
 
 class TickArchive:

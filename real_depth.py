@@ -18,9 +18,15 @@ by_ticker_ask = defaultdict(list)
 by_ticker_bid = defaultdict(list)
 n_rows = 0
 
+print("=== ARCHIVE HEALTH ===")
+for day in tick_archive.archived_days():
+    v = tick_archive.verify_day(day)
+    print(f"  {day}: {v['records']:,} records, {v['bad_lines']} unreadable")
+print()
+
 for day in tick_archive.archived_days():
     for rec in tick_archive.read_day(day):
-        msg = rec.get("m")
+        msg = tick_archive.message_of(rec)
         if not isinstance(msg, dict) or msg.get("type") != "ticker":
             continue
         body = msg.get("msg") or {}

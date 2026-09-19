@@ -51,6 +51,36 @@ class TestRoundTrip(TickArchiveTestCase):
         self.assertIn(raw, line)
         self.assertNotIn('\\"', line, "message was escaped as a string")
 
+    def test_a_trailing_newline_does_not_split_the_record(self):
+        # The bug that split 231,663 records in two: Kalshi's messages
+        # arrive with a trailing newline, so embedding them verbatim put
+        # the closing brace on the following line.
+        with self.archive() as a:
+            a.append(DAY_A, '{"type":"ticker","n":1}\n')
+            a.append(DAY_A + 1, '{"type":"ticker","n":2}\n')
+        with gzip.open(os.path.join(self.dir, "2026-09-19.jsonl.gz"),
+                       "rt", encoding="utf-8") as fh:
+            lines = [l for l in fh.read().split("\n") if l]
+        self.assertEqual(len(lines), 2, "a record spilled onto a second line")
+        got = list(tick_archive.read_day("2026-09-19", self.dir))
+        self.assertEqual([tick_archive.message_of(r)["n"] for r in got], [1, 2])
+
+    def test_a_trailing_newline_still_embeds_as_an_object(self):
+        # Stripping the framing newline should keep the fast path, not
+        # push the record down the escaped-string fallback.
+        with self.archive() as a:
+            a.append(DAY_A, '{"type":"ticker","n":1}\n')
+        got = list(tick_archive.read_day("2026-09-19", self.dir))
+        self.assertIsInstance(got[0]["m"], dict)
+
+    def test_message_of_handles_both_stored_forms(self):
+        with self.archive() as a:
+            a.append(DAY_A, '{"n":1}')                 # verbatim object
+            a.append(DAY_A + 1, 'line one\nline two')  # escaped string
+        got = list(tick_archive.read_day("2026-09-19", self.dir))
+        self.assertEqual(tick_archive.message_of(got[0]), {"n": 1})
+        self.assertEqual(tick_archive.message_of(got[1]), "line one\nline two")
+
     def test_a_multiline_message_does_not_break_the_file(self):
         # The bug this guards: embedding a message verbatim is only safe
         # while it is single-line. A pretty-printed payload split across
