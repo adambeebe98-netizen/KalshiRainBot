@@ -154,26 +154,142 @@ that's exactly the kind of shortcut that's invisible three months later.
 The split boundaries are constants on purpose — if they were config
 they'd drift the first time a result disappointed.
 
-## Real-time pipeline status (as of last session)
+## What this project is actually for (2026-09-19)
 
-Both `kalshi-realtime-ws` and `kalshi-realtime-weather` were built,
-tested (572 tests passing), and deployed. The weather poller ran clean
-the entire time. The WebSocket listener hit and got a real fix for the
-`market_lifecycle_v2` flood above, ran clean for a couple minutes after
-that fix, but was stopped before fully confirming ticks were landing
-correctly in `realtime_ticks` end to end. **That's the actual next
-step** — restart both services, let them run for a while, and verify
-real rows are accumulating correctly (row counts, spot-check a few
-against Kalshi's own displayed prices) before treating this as done.
+Not the hand-written strategies in `shadow.py` — those are
+instrumentation. The goal is high-quality data collection now, feeding a
+learned model later, trained on a GPU machine at home.
+
+The thesis comes from how the project started: a $200 loss on "will it
+rain in Austin", where it rained at the house and not at the airport
+gauge the contract settles on. So the edge being pursued is
+**understanding the instrument and the settlement product better than
+the people trading it**, not out-forecasting NOAA, which is unwinnable.
+
+The architecture that follows:
+
+- **Layer 1, the weatherman.** Predicts what a specific gauge reports in
+  a specific NWS product. Must be trained on decades of station history
+  (IEM), *not* on Kalshi outcomes — there are only 612 historical
+  daily-rain markets and **554 of them are New York**. Every other city
+  has exactly 3.
+- **Layer 2, the trader.** Takes Layer 1's calibrated probability,
+  compares to price, sizes net of fees.
+
+### The target definition, verified
+
+Rain markets settle on NWS **CLI products** (`CLIAUS`, `CLINYC`, …) —
+the official daily climate report for one designated station. The
+threshold, on 552 of 612 daily markets, is "strictly greater than 0
+inches of precipitation".
+
+**Trace counts.** `analysis/trace_test.py` joins 478 settled NYC markets
+to the CLI archive and the separation is perfect: `0.00` settles NO
+(268/268), `T` settles **YES** (34/34), a number settles YES (176/176).
+
+Consequently P(measurable rain, ≥0.01") = **36.9%** while P(contract
+settles YES) = **44.0%**. A model trained on measurable rainfall predicts
+an event 7 points rarer than the one being paid on, on every market, in
+the same direction. Define labels against the settlement product, never
+against a physical threshold that looks equivalent.
+
+The market already knows this — trace days price at 82c mean / 97c
+median 12h out against 21c for dry days. There is no free money there.
+
+### Structural facts about these markets
+
+- **No price data exists beyond ~36h before close.** The tradeable window
+  is ~36 hours, not days. A candidate needing a longer lead time has
+  nothing to trade, not merely a worse forecast.
+- **The market is sharp.** Brier 0.1391 at 24h against 0.2469 for a
+  constant. That is the bar, and it is much higher than the earlier
+  shadow-sample analysis suggested (that sample was selected on
+  disagreement with the price, which flattered the constant).
+
+## The evaluation harness (`evaluation/`)
+
+Nine modules, built 2026-09-19. **Read `evaluation/DESIGN.md` before
+touching any of it** — especially section 12 (where the design pushes
+back on its own brief) and section 14 (amendments after `analysis/`).
+
+Its job is not to find edge. It is to **make false edge hard to
+manufacture**. Everything downstream is only as trustworthy as this is.
+
+- `stats.py` — deflated Sharpe, block bootstrap, Brier. Note: the
+  familiar √(2 ln N) overestimates the luck threshold (5.26 vs a true
+  4.86 at a million trials); Bailey's estimator is what the code uses.
+- `pit.py` — point-in-time access. There is no accessor that returns a
+  future row and none that returns the label. `historical_weather_points`
+  has UNKNOWN availability and is **refused** unless you pass
+  `allow_unverified=True` with a written reason, which is logged.
+- `folds.py` — purged, embargoed walk-forward. Label-period overlap
+  removal is unconditional; `purge_seconds=0` does not disable it.
+- `execution.py` / `objective.py` — fills at the next candle's **ask**,
+  no fill in a zero-volume hour (38.6% of them), size capped at 10% of
+  volume. Net-of-fees is the only figure any reporting surface emits.
+- `registry.py` — `eval_trials` is **append-only, enforced by SQLite
+  triggers**. Deleting rows lowers the multiple-testing bar for every
+  future result. Do not try to route around this.
+- `baselines.py` — market price and an out-of-sample constant. The
+  best-heuristic baseline is **not implemented and raises**; `shadow.py`
+  is not pure. Every report says so.
+- `harness.py` — PASS requires positive net P&L, beating every baseline,
+  DSR > 0.95, and the bootstrap gate. There is no "promising" state.
+- `worked_example.py` — a real run on TRAIN+DEV.
+
+**Acceptance tests are the point.** 120 provably-random strategies must
+produce zero passes, and an oracle must be caught. If
+`tests/test_eval_acceptance.py` ever fails, nothing the harness says can
+be believed until it passes again.
+
+### First real result
+
+The "market overprices YES" hypothesis from
+`analysis/horizon_calibration.py` was run through the harness and
+**failed**: net −$19.49 over 58 trades, DSR 0.0785, 81% of bootstrap
+resamples at or below zero. It beat guessing the base rate and lost to
+not trading. Treat it as closed unless something new turns up.
+
+## Real-time pipeline status (2026-09-19, verified)
+
+Both services restarted and **confirmed working end to end**. Only
+weather tickers are landing — KXRAIN, KXLOWT, KXHIGH, zero crypto — so
+the `market_lifecycle_v2` fix is genuinely the code that runs. ~2,200
+ticks per 5 minutes across 774 markets. DB is now `journal_mode=wal`.
+
+A single failed tick write used to tear down the whole WebSocket
+connection (confirmed twice in 27 minutes). Fixed: the write is caught at
+the call site, runs off the event loop via `asyncio.to_thread`, and
+retries on lock contention.
+
+### Known data gap: no observed rainfall
+
+`precip_last_hour_mm` and `precip_last_3hr_mm` are **always NULL** — 0 of
+302 observations. This is NWS, not a bug: `precipitationLastHour` is
+absent from the payload entirely, and the raw METAR fallback does not
+help (P-group in 0 of 72 observations at KMDW). The parser is correct.
+
+For a point gauge, **do not substitute Open-Meteo's gridded
+precipitation** — a model grid cell is not the airport bucket, and that
+distinction is the whole $200 lesson in data form. Use the **Iowa
+Environmental Mesonet ASOS archive**, which is the same instrument the
+contracts settle on.
 
 ## Testing
 
 ```
-python3 -m unittest discover -s tests
+venv/bin/python -m unittest discover -s tests
 ```
-569+ tests, all passing as of last session. Run the full suite, not
-individual files — see the test-isolation gotcha above for why that
-distinction actually matters here.
+797 tests. One known failure: `test_bot.py`'s
+`test_real_environment_returns_none_gracefully_when_not_a_git_checkout`
+asserts `get_git_commit()` returns None "when not a git checkout", but
+the test file lives inside the repo, so it returns a hash. It is an
+environment-dependent test, not a code bug — but it means the suite can
+never be green, which is worth fixing so that "tests pass" means
+something again.
+
+Run the full suite, not individual files — see the test-isolation gotcha
+above for why that distinction actually matters here.
 
 ## Data scale for context
 
