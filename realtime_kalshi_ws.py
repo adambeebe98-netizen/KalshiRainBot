@@ -51,9 +51,22 @@ import websockets
 from config import SETTINGS
 from kalshi_client import KalshiClient, auth_headers, derive_ws_url, load_private_key, market_price_cents
 import storage
+import tick_archive
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("realtime_kalshi_ws")
+
+
+def archive_pointer(received_ts: int) -> str:
+    """What goes in realtime_ticks.raw_json now.
+
+    The column is NOT NULL and the table is growing by ~770k rows a day,
+    so rebuilding it to allow NULL would be an expensive migration for no
+    benefit. Instead the column becomes what it now is: a pointer saying
+    which archive file holds the full message. Eleven bytes instead of
+    five hundred and forty, and it still answers "where is the original".
+    """
+    return f"@{tick_archive.day_key(received_ts)}"
 
 RECONNECT_BASE_DELAY_SECONDS = 2
 RECONNECT_MAX_DELAY_SECONDS = 60
@@ -201,6 +214,9 @@ async def run_listener() -> None:
     ws_url = ws_base
 
     reconnect_delay = RECONNECT_BASE_DELAY_SECONDS
+    # Built once, outside the reconnect loop: a reconnect must not lose
+    # buffered records or start a new file.
+    archive = tick_archive.TickArchive()
 
     while True:
         try:
@@ -253,6 +269,13 @@ async def run_listener() -> None:
 
                         if tick is not None:
                             try:
+                                # The full message goes to the gzipped
+                                # day archive; the row keeps a pointer to
+                                # it. At ~770k ticks/day the 544-byte
+                                # raw_json blob was ~460MB/day into the
+                                # same SQLite file the trading bot uses,
+                                # for data nothing ever read back.
+                                archive.append(received_ts, raw)
                                 # Off the event loop on purpose. get_conn sets
                                 # busy_timeout=5000, so a contended write can
                                 # block for up to five seconds -- and a blocked
@@ -265,7 +288,8 @@ async def run_listener() -> None:
                                     ticker=tick.ticker, channel=tick.channel, ts=tick.ts,
                                     received_ts=received_ts, yes_price_cents=tick.yes_price_cents,
                                     yes_bid_cents=tick.yes_bid_cents, yes_ask_cents=tick.yes_ask_cents,
-                                    volume=tick.volume, open_interest=tick.open_interest, raw_json=raw,
+                                    volume=tick.volume, open_interest=tick.open_interest,
+                                    raw_json=archive_pointer(received_ts),
                                 )
                             except Exception:
                                 # A failed write loses this one tick. Letting it
@@ -288,8 +312,14 @@ async def run_listener() -> None:
 
                     now = time.time()
                     if now - last_log > 300:
-                        log.info("%d ticks written, %d dropped in the last 5 min, tracking %d markets",
-                                  ticks_written, ticks_dropped, len(tracked))
+                        # Flush here too, not only on the buffer thresholds:
+                        # a quiet period should not leave records sitting in
+                        # memory indefinitely waiting for a count to fill.
+                        archive.flush()
+                        log.info("%d ticks written, %d dropped in the last 5 min, "
+                                  "tracking %d markets, %d archived this run",
+                                  ticks_written, ticks_dropped, len(tracked),
+                                  archive.records_written)
                         ticks_written = 0
                         ticks_dropped = 0
                         last_log = now
@@ -304,6 +334,9 @@ async def run_listener() -> None:
                         last_rediscover = now
 
         except Exception:
+            # Get buffered records onto disk before sleeping. A reconnect
+            # is exactly when an unclean exit is most likely next.
+            archive.flush()
             log.exception("WebSocket connection lost, reconnecting in %ds", reconnect_delay)
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY_SECONDS)

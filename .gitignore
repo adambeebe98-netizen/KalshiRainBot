@@ -12,3 +12,5 @@ rules_cache.json
 service.log
 install.log
 install_ui.log
+data/
+maintenance.log
