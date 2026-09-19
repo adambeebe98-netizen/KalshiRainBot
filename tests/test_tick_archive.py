@@ -51,6 +51,44 @@ class TestRoundTrip(TickArchiveTestCase):
         self.assertIn(raw, line)
         self.assertNotIn('\\"', line, "message was escaped as a string")
 
+    def test_a_multiline_message_does_not_break_the_file(self):
+        # The bug this guards: embedding a message verbatim is only safe
+        # while it is single-line. A pretty-printed payload split across
+        # two lines and made every record after it unreadable.
+        pretty = '{\n  "type": "ticker",\n  "n": 1\n}'
+        with self.archive() as a:
+            a.append(DAY_A, pretty)
+            a.append(DAY_A + 1, '{"type":"ticker","n":2}')
+            a.append(DAY_A + 2, '{"type":"ticker","n":3}')
+        got = list(tick_archive.read_day("2026-09-19", self.dir))
+        self.assertEqual(len(got), 3, "a multiline message ate the records "
+                                      "that followed it")
+        self.assertIn("ticker", got[0]["m"])
+        self.assertEqual(got[2]["m"]["n"], 3)
+
+    def test_a_damaged_line_does_not_abort_the_read(self):
+        with self.archive() as a:
+            a.append(DAY_A, '{"n":1}')
+        path = os.path.join(self.dir, "2026-09-19.jsonl.gz")
+        with gzip.open(path, "at", encoding="utf-8") as fh:
+            fh.write('{"r":1,"m":{"broken"\n')
+            fh.write('{"r":2,"m":{"n":3}}\n')
+        seen = []
+        got = list(tick_archive.read_day(
+            "2026-09-19", self.dir, on_bad_line=lambda *a: seen.append(a)))
+        self.assertEqual(len(got), 2)
+        self.assertEqual(len(seen), 1)
+
+    def test_verify_day_counts_damage(self):
+        with self.archive() as a:
+            a.append(DAY_A, '{"n":1}')
+        path = os.path.join(self.dir, "2026-09-19.jsonl.gz")
+        with gzip.open(path, "at", encoding="utf-8") as fh:
+            fh.write("not json\n")
+        out = tick_archive.verify_day("2026-09-19", self.dir)
+        self.assertEqual(out["records"], 1)
+        self.assertEqual(out["bad_lines"], 1)
+
     def test_non_json_message_is_stored_safely(self):
         with self.archive() as a:
             a.append(DAY_A, "not json at all")

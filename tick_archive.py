@@ -50,12 +50,18 @@ def path_for(received_ts: int, directory: str = DEFAULT_DIR) -> str:
 def _encode(received_ts: int, raw: str) -> str:
     """One archive line.
 
-    A message that is not JSON (never seen, but the listener does not
-    validate) is stored as a JSON string instead, so a malformed message
-    corrupts one field rather than the whole file.
+    Embedding the message verbatim is only safe while it is single-line
+    JSON. A message containing a newline would split across two lines and
+    break the one-record-per-line contract for everything after it -- which
+    is exactly what happened to records moved out of the database by the
+    legacy migration, where some stored payloads were pretty-printed.
+
+    So: verbatim when the message is single-line JSON, and json.dumps
+    otherwise. The fallback escapes rather than strips, so nothing is
+    lost; the record simply carries its message as a string.
     """
     stripped = raw.lstrip()
-    if stripped[:1] in ("{", "["):
+    if stripped[:1] in ("{", "[") and "\n" not in raw and "\r" not in raw:
         return '{"r":%d,"m":%s}' % (received_ts, raw)
     return json.dumps({"r": received_ts, "m": raw}, separators=(",", ":"))
 
@@ -122,16 +128,39 @@ class TickArchive:
         self.close()
 
 
-def read_day(day: str, directory: str = DEFAULT_DIR):
-    """Yield {'r': received_ts, 'm': message} for one archived day."""
+def read_day(day: str, directory: str = DEFAULT_DIR, on_bad_line=None):
+    """Yield {'r': received_ts, 'm': message} for one archived day.
+
+    A line that will not parse is skipped rather than aborting the read.
+    An archive is worth having because it can be reprocessed years later,
+    and one damaged record should not make the other three quarters of a
+    million unreadable. Pass `on_bad_line` to count or log them; the
+    default is to drop them silently, which is the right behaviour for a
+    caller that just wants the data and the wrong one for a caller
+    auditing archive health -- hence the hook.
+    """
     path = os.path.join(directory, f"{day}.jsonl.gz")
     if not os.path.exists(path):
         return
     with gzip.open(path, "rt", encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 yield json.loads(line)
+            except ValueError as exc:
+                if on_bad_line is not None:
+                    on_bad_line(day, lineno, str(exc))
+
+
+def verify_day(day: str, directory: str = DEFAULT_DIR) -> dict:
+    """Count readable and unreadable records in one archived day."""
+    bad = []
+    good = sum(1 for _ in read_day(
+        day, directory, on_bad_line=lambda d, n, e: bad.append((n, e))))
+    return {"day": day, "records": good, "bad_lines": len(bad),
+            "first_bad": bad[0] if bad else None}
 
 
 def archived_days(directory: str = DEFAULT_DIR) -> list[str]:

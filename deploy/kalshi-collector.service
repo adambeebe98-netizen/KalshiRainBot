@@ -1,0 +1,17 @@
+[Unit]
+Description=Kalshi Market Collector (records only, never trades)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/kalshi_weather_bot
+ExecStart=/root/kalshi_weather_bot/venv/bin/python -u collector.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/kalshi_weather_bot/collector.log
+StandardError=append:/root/kalshi_weather_bot/collector.log
+
+[Install]
+WantedBy=multi-user.target
