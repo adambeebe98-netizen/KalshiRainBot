@@ -8,7 +8,8 @@ no accessor that returns the label at all.
 
 Two things follow from that, and both are deliberate:
 
-1. Every source declares how its availability is known (§3.2 of DESIGN.md).
+1. Every source declares how its availability is known (section 3.2 of
+   DESIGN.md).
    The archive has no receive time and never will, so "filter on
    received_at" is impossible there. Instead availability is a typed
    property: MEASURED where a row carries a real receipt timestamp,
@@ -190,7 +191,11 @@ class PointInTimeView:
         self.as_of = as_of
         self.allow_unverified = allow_unverified
         self.reason = reason
-        self._db_path = db_path or SETTINGS.db_path
+        # Public: execution models need it to build a forward view at the
+        # fill moment. They are harness infrastructure and are supposed to
+        # see what happened after the decision -- that is what "how did the
+        # order fill" means. Candidates never construct one.
+        self.db_path = db_path or SETTINGS.db_path
         self._catalog = default_sources(candle_publish_lag_s)
         declared = sources if sources is not None else [
             "historical_price_points", "market_snapshots", "realtime_ticks",
@@ -206,7 +211,7 @@ class PointInTimeView:
     # -- plumbing ---------------------------------------------------------
 
     def _connect(self):
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.row_factory = sqlite3.Row
         return conn
@@ -266,7 +271,7 @@ class PointInTimeView:
 
     def weather_points(self, station_code: str) -> list[dict]:
         """UNKNOWN availability -- refused unless the view was built with
-        allow_unverified and a reason. See §3.3 of DESIGN.md."""
+        allow_unverified and a reason. See section 3.3 of DESIGN.md."""
         return self._rows("historical_weather_points", "station_code = ?",
                            (station_code,))
 
