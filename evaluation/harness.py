@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 from evaluation import baselines as baselines_mod
 from evaluation import folds as folds_mod
-from evaluation import objective, pit, registry, stats
+from evaluation import execution, objective, pit, registry, stats
 from evaluation.execution import ExecutionModel
 
 DEFAULT_DECISION_HORIZONS_S = (24 * 3600,)
@@ -163,6 +163,75 @@ def _run_one(trader, fold, execution_model: ExecutionModel, horizons_s,
                             n_decisions=n_decisions, label=label)
 
 
+def _run_swing(trader, fold, execution_model: ExecutionModel, db_path,
+               label: str, price_cache=None, sources=DEFAULT_SOURCES,
+               step_hours: int = 3,
+               max_lead_hours: int = 36) -> objective.Result:
+    """Run a stateful swing trader over one fold.
+
+    Differs from _run_one in the way that matters: many decisions per
+    market with a position carried between them, and an exit that pays
+    the spread in the other direction. A position still open when the
+    market closes settles at the outcome, which is the honest treatment --
+    "I would have got out in time" is the assumption a swing backtest
+    most wants to make and least deserves.
+    """
+    trades = []
+    n_decisions = 0
+    cache = price_cache or pit.PriceCache(fold.test_tickers, db_path=db_path)
+    terms_view = pit.PointInTimeView(
+        fold.test_end, sources=["historical_price_points"], db_path=db_path,
+        price_cache=cache)
+    labels = pit.labels_for(fold.test_tickers, db_path=db_path)
+
+    for ticker in sorted(fold.test_tickers):
+        terms = terms_view.market(ticker)
+        if terms is None or not terms.close_time:
+            continue
+        label_row = labels.get(ticker)
+        if label_row is None:
+            continue
+        close = pit.iso_to_epoch(terms.close_time)
+        opened = pit.iso_to_epoch(terms.open_time)
+        if close is None or opened is None:
+            continue
+
+        position = None
+        entry_fill = None
+        start = max(opened, close - max_lead_hours * 3600)
+        as_of = start
+        while as_of < close:
+            view = pit.PointInTimeView(
+                as_of, sources=list(sources), db_path=db_path,
+                price_cache=cache)
+            n_decisions += 1
+            action, decision = trader.decide(view, terms, as_of, position)
+            if action == "enter" and decision is not None:
+                fill = execution_model.execute(decision, view)
+                if fill is not None:
+                    position = execution.Position(
+                        ticker=ticker, side=fill.side, contracts=fill.contracts,
+                        entry_price_cents=fill.price_cents,
+                        entered_at=fill.filled_at)
+                    entry_fill = fill
+            elif action == "exit" and position is not None:
+                exit_fill = execution_model.execute_exit(position, view, as_of)
+                if exit_fill is not None:
+                    trades.append(objective.settle(
+                        entry_fill, label_row.result,
+                        exit_price_cents=exit_fill.price_cents))
+                    position, entry_fill = None, None
+            as_of += step_hours * 3600
+
+        if position is not None and entry_fill is not None:
+            # Never got out. Settles at the outcome, fees and all.
+            trades.append(objective.settle(entry_fill, label_row.result))
+
+    return objective.Result(trades=tuple(trades),
+                            assumptions=execution_model.assumptions(),
+                            n_decisions=n_decisions, label=label)
+
+
 def _judge(candidate, run, result, fold_results, baseline_results,
            seed: int, bootstrap_resamples: int,
            db_path: str | None) -> CandidateReport:
@@ -247,7 +316,8 @@ def evaluate_many(candidates, markets: list[dict],
                   splits_used: str = "train+dev",
                   bootstrap_resamples: int = 500,
                   sources=DEFAULT_SOURCES,
-                  progress=None) -> list[CandidateReport]:
+                  progress=None, swing: bool = False,
+                  step_hours: int = 3) -> list[CandidateReport]:
     """Evaluate a population of candidates against one set of folds.
 
     Sharing the work is not only a speed matter. Folds, price caches and
@@ -287,11 +357,19 @@ def evaluate_many(candidates, markets: list[dict],
             purge_seconds=purge_seconds, embargo_seconds=embargo_seconds,
             execution_assumptions=execution_model.assumptions(),
             db_path=db_path)
-        fold_results = [
-            _run_one(candidate, fold, execution_model, horizons_s, db_path,
-                     label=f"{candidate.name} fold {fold.index}",
-                     price_cache=caches[fold.index], sources=sources)
-            for fold in fold_list]
+        if swing:
+            fold_results = [
+                _run_swing(candidate, fold, execution_model, db_path,
+                           label=f"{candidate.name} fold {fold.index}",
+                           price_cache=caches[fold.index], sources=sources,
+                           step_hours=step_hours)
+                for fold in fold_list]
+        else:
+            fold_results = [
+                _run_one(candidate, fold, execution_model, horizons_s, db_path,
+                         label=f"{candidate.name} fold {fold.index}",
+                         price_cache=caches[fold.index], sources=sources)
+                for fold in fold_list]
         result = objective.combine(fold_results, label=candidate.name)
         reports.append(_judge(candidate, run, result, tuple(fold_results),
                               baseline_results, seed, bootstrap_resamples,

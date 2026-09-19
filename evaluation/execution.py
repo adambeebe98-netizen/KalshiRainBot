@@ -73,6 +73,19 @@ class Fill:
 
 
 @dataclass(frozen=True)
+class Position:
+    """An open position, carried between decisions."""
+    ticker: str
+    side: str
+    contracts: int
+    entry_price_cents: int
+    entered_at: int
+
+    def unrealised_cents(self, mark_cents: int) -> int:
+        return (mark_cents - self.entry_price_cents) * self.contracts
+
+
+@dataclass(frozen=True)
 class ExecutionAssumptions:
     """Copied verbatim into every result. Reading this should tell you how
     much to believe the number it accompanies."""
@@ -200,6 +213,50 @@ class HourlyCandleExecution(ExecutionModel):
                     contracts=contracts, price_cents=price,
                     filled_at=candle["ts"],
                     requested_contracts=decision.contracts)
+
+    def execute_exit(self, position: Position, view,
+                     as_of: int) -> Fill | None:
+        """Close a position, paying the spread in the other direction.
+
+        This is the half a hold-to-settlement backtest never has to model,
+        and the half where an optimistic assumption does the most damage:
+        getting OUT is where a strategy that looked profitable on paper
+        discovers what the book actually costs. Selling YES hits the bid,
+        not the ask; selling NO means buying YES back at the ask, so it
+        realises 100 minus that.
+        """
+        earliest = as_of + self.latency_seconds
+        from evaluation.pit import PointInTimeView
+        forward = PointInTimeView(
+            earliest + self.MAX_LOOKAHEAD_S,
+            sources=["historical_price_points"], db_path=view.db_path,
+            price_cache=getattr(view, "price_cache", None))
+        future = [c for c in forward.price_points(position.ticker)
+                  if c["ts"] > earliest]
+        if not future:
+            return None
+        candle = future[0]
+        volume = candle.get("volume") or 0
+        if volume <= 0:
+            return None
+
+        if position.side == "yes":
+            bid = candle.get("yes_bid_cents")
+            price = int(bid) if bid is not None and 0 <= bid <= 100 else None
+        else:
+            ask = candle.get("yes_ask_cents")
+            price = (100 - int(ask)) if ask is not None and 0 <= ask <= 100 else None
+        if price is None:
+            return None
+
+        capacity = int(self.participation_rate * volume)
+        contracts = min(position.contracts, capacity)
+        if contracts <= 0:
+            return None
+        return Fill(ticker=position.ticker, side=position.side,
+                    contracts=contracts, price_cents=price,
+                    filled_at=candle["ts"],
+                    requested_contracts=position.contracts)
 
     @staticmethod
     def _fill_price(side: str, candle: dict) -> int | None:
