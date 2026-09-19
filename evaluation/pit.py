@@ -35,6 +35,7 @@ import datetime as dt
 import inspect
 import os
 import sqlite3
+from contextlib import closing
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -282,7 +283,7 @@ class PointInTimeView:
         return src
 
     def _log_unverified(self, source: str, rows: int) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(UNVERIFIED_ACCESS_DDL)
             conn.execute(
                 "INSERT INTO eval_unverified_access "
@@ -297,7 +298,7 @@ class PointInTimeView:
         sql = (f"SELECT * FROM {src.name} "
                f"WHERE {where} AND {src.available_at_sql()} <= ? "
                f"ORDER BY {src.time_column}")
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             out = [dict(r) for r in conn.execute(sql, params + (self.as_of,))]
         if src.availability is Availability.UNKNOWN:
             self._log_unverified(name, len(out))
@@ -354,7 +355,7 @@ class PointInTimeView:
         scanning for tradeable markets should simply not see it.
         """
         self._check_market_source()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT ticker, series_ticker, event_ticker, station_code, "
                 "measure, threshold_low_f, threshold_high_f, "
@@ -379,7 +380,7 @@ class PointInTimeView:
         if measure is not None:
             sql += " WHERE measure = ?"
             params = (measure,)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = [dict(r) for r in conn.execute(sql, params)]
         out = []
         for r in rows:

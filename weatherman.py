@@ -31,6 +31,7 @@ import datetime as dt
 import json
 import math
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 
 from config import SETTINGS
@@ -84,7 +85,7 @@ def utc_offset_hours(lon: float) -> int:
 def station_windows(station: str, start_ts: int, end_ts: int,
                     db_path: str | None = None) -> list[tuple[int, int]]:
     """Daily [start, end) windows at local midnight for one station."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         row = conn.execute("SELECT lon FROM wx_stations WHERE station = ?",
                            (station,)).fetchone()
     if row is None:
@@ -146,7 +147,7 @@ class ArchiveCache:
     @classmethod
     def load(cls, station: str, lead_hours: int, db_path: str | None = None):
         c = cls()
-        with _connect(db_path) as conn:
+        with closing(_connect(db_path)) as conn:
             for ts, v in conn.execute(
                     "SELECT valid_at, precip_in FROM wx_observations "
                     "WHERE station = ? AND precip_in IS NOT NULL", (station,)):

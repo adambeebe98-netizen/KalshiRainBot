@@ -106,9 +106,12 @@ def _trades_per_day(trades) -> int:
     return max(1, round(sum(days.values()) / len(days)))
 
 
+DEFAULT_SOURCES = ("historical_price_points",)
+
+
 def _run_one(trader, fold, execution_model: ExecutionModel, horizons_s,
              db_path: str | None, label: str,
-             price_cache=None) -> objective.Result:
+             price_cache=None, sources=DEFAULT_SOURCES) -> objective.Result:
     """Run one trader over one fold's test markets."""
     trades = []
     n_decisions = 0
@@ -135,7 +138,7 @@ def _run_one(trader, fold, execution_model: ExecutionModel, horizons_s,
             # the market -- view.market() would return exactly the same
             # answer at the cost of a database round trip per decision.
             view = pit.PointInTimeView(
-                as_of, sources=["historical_price_points"], db_path=db_path,
+                as_of, sources=list(sources), db_path=db_path,
                 price_cache=cache)
             n_decisions += 1
             decision = trader.decide(view, terms, as_of)
@@ -155,7 +158,8 @@ def evaluate(candidate, markets: list[dict], execution_model: ExecutionModel,
              horizons_s=DEFAULT_DECISION_HORIZONS_S,
              db_path: str | None = None,
              splits_used: str = "train+dev",
-             bootstrap_resamples: int = 2000) -> CandidateReport:
+             bootstrap_resamples: int = 2000,
+             sources=DEFAULT_SOURCES) -> CandidateReport:
     """Evaluate one candidate end to end and return a verdict.
 
     `candidate` is anything with `.name` and
@@ -182,7 +186,8 @@ def evaluate(candidate, markets: list[dict], execution_model: ExecutionModel,
         cache = pit.PriceCache(fold.test_tickers, db_path=db_path)
         candidate_folds.append(_run_one(
             candidate, fold, execution_model, horizons_s, db_path,
-            label=f"{candidate.name} fold {fold.index}", price_cache=cache))
+            label=f"{candidate.name} fold {fold.index}", price_cache=cache,
+            sources=sources))
         # Baselines are refitted per fold on that fold's TRAINING markets
         # only -- a constant fitted on everything would have seen the test
         # window, which is the whole thing the fold structure prevents.
@@ -196,7 +201,7 @@ def evaluate(candidate, markets: list[dict], execution_model: ExecutionModel,
             baseline_folds.setdefault(trader.kind, []).append(
                 _run_one(trader, fold, execution_model, horizons_s, db_path,
                          label=f"{trader.name} fold {fold.index}",
-                         price_cache=cache))
+                         price_cache=cache, sources=sources))
 
     result = objective.combine(candidate_folds, label=candidate.name)
     baseline_results = {name: objective.combine(runs, label=name)

@@ -30,6 +30,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from contextlib import closing
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -107,7 +108,7 @@ def _connect(db_path: str | None = None):
 
 
 def init(db_path: str | None = None) -> None:
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.executescript(SCHEMA)
         conn.commit()
 
@@ -155,7 +156,7 @@ def snapshot_boundaries(tables=DEFAULT_SNAPSHOT_TABLES,
     can tell "this table did not exist" apart from "nobody looked".
     """
     out: dict[str, int] = {}
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         for table in tables:
             try:
                 cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
@@ -250,7 +251,7 @@ def open_run(config: dict, seed: int, splits_used: str,
         execution_assumptions=assumptions,
         data_boundaries=snapshot_boundaries(snapshot_tables, db_path),
     )
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.execute(
             "INSERT INTO eval_runs (run_id, ts, config_hash, seed, code_commit, "
             "splits_used, purge_seconds, embargo_seconds, execution_model, "
@@ -267,7 +268,7 @@ def open_run(config: dict, seed: int, splits_used: str,
 
 def load_run(run_id: str, db_path: str | None = None) -> RunRecord | None:
     init(db_path)
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         row = conn.execute("SELECT * FROM eval_runs WHERE run_id = ?",
                            (run_id,)).fetchone()
     if row is None:
@@ -306,7 +307,7 @@ def record_trial(run_id: str, candidate_name: str, config_hash_: str,
     look, and the selection effect does not care that you were unimpressed.
     """
     init(db_path)
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.execute(
             "INSERT INTO eval_trials (ts, run_id, candidate_name, config_hash, "
             "code_commit, net_sharpe, verdict) VALUES (?,?,?,?,?,?,?)",
@@ -319,7 +320,7 @@ def record_trial(run_id: str, candidate_name: str, config_hash_: str,
 
 def trials_to_date(db_path: str | None = None) -> int:
     init(db_path)
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         (n,) = conn.execute("SELECT COUNT(*) FROM eval_trials").fetchone()
     return int(n)
 
@@ -339,7 +340,7 @@ def observed_sharpe_variance(db_path: str | None = None,
     variance that would make the luck threshold vanish exactly when the
     sample is too small to trust.
     """
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         values = [r[0] for r in conn.execute(
             "SELECT net_sharpe FROM eval_trials WHERE net_sharpe IS NOT NULL")]
     if len(values) < 2:
@@ -374,6 +375,6 @@ def trial_banner(n_trials: int | None = None,
 
 def history(limit: int = 50, db_path: str | None = None) -> list[dict]:
     init(db_path)
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM eval_trials ORDER BY id DESC LIMIT ?", (limit,))]
