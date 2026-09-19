@@ -188,6 +188,81 @@ class MatchEventNear(unittest.TestCase):
         self.assertIsNone(mj.match_event_near(f, reversed_))
 
 
+class MatchEventAt(unittest.TestCase):
+    """Baseball breaks date-only matching in two separate ways.
+
+    Date-only matching put 10.9% of MLB markets on the wrong game:
+    roughly half a neighbouring day of the same series, half the other
+    end of a doubleheader. Both are resolved by start time.
+    """
+
+    def _ev(self, eid, iso):
+        return {"event_id": eid, "date": iso, "competitors": [
+            {"abbrev": "CHC", "home_away": "away"},
+            {"abbrev": "PIT", "home_away": "home"}]}
+
+    def _fixture(self):
+        return mj.fixture_for("KXMLBGAME-25APR30CHCPIT-PIT")
+
+    def test_picks_the_doubleheader_game_that_matches_the_close(self):
+        by_date = {"2025-04-30": [self._ev("G1", "2025-04-30T17:05Z"),
+                                  self._ev("G2", "2025-04-30T21:05Z")]}
+        close = mj._epoch("2025-04-30T23:55Z")     # after game 2
+        self.assertEqual(
+            mj.match_event_at(self._fixture(), by_date, close)["event_id"],
+            "G2")
+
+    def test_picks_game_one_when_the_market_closed_between_them(self):
+        by_date = {"2025-04-30": [self._ev("G1", "2025-04-30T17:05Z"),
+                                  self._ev("G2", "2025-04-30T21:05Z")]}
+        close = mj._epoch("2025-04-30T20:10Z")     # before game 2 starts
+        self.assertEqual(
+            mj.match_event_at(self._fixture(), by_date, close)["event_id"],
+            "G1")
+
+    def test_does_not_take_yesterdays_game_in_the_same_series(self):
+        """Teams play three-day series; the ±1 day window sees them all."""
+        by_date = {"2025-04-29": [self._ev("PREV", "2025-04-29T22:40Z")],
+                   "2025-04-30": [self._ev("TODAY", "2025-04-30T22:40Z")]}
+        close = mj._epoch("2025-05-01T01:50Z")
+        self.assertEqual(
+            mj.match_event_at(self._fixture(), by_date, close)["event_id"],
+            "TODAY")
+
+    def test_refuses_a_game_that_started_after_the_market_closed(self):
+        by_date = {"2025-04-30": [self._ev("LATER", "2025-04-30T23:00Z")]}
+        close = mj._epoch("2025-04-30T20:00Z")
+        self.assertIsNone(
+            mj.match_event_at(self._fixture(), by_date, close),
+            "a game cannot settle a contract that closed before it began")
+
+    def test_refuses_a_start_too_far_before_the_close(self):
+        by_date = {"2025-04-30": [self._ev("STALE", "2025-04-30T00:05Z")]}
+        close = mj._epoch("2025-04-30T23:55Z")     # ~24h later
+        self.assertIsNone(
+            mj.match_event_at(self._fixture(), by_date, close))
+
+    def test_falls_back_to_date_matching_with_no_close_time(self):
+        by_date = {"2025-04-30": [self._ev("ONLY", "2025-04-30T22:40Z")]}
+        self.assertEqual(
+            mj.match_event_at(self._fixture(), by_date, None)["event_id"],
+            "ONLY")
+
+    def test_no_candidates_is_none(self):
+        self.assertIsNone(mj.match_event_at(self._fixture(), {}, 0))
+
+
+class CandidateEvents(unittest.TestCase):
+
+    def test_collects_across_the_window_without_duplicates(self):
+        ev = {"event_id": "A", "date": "2025-04-30T22:40Z", "competitors": [
+            {"abbrev": "CHC", "home_away": "away"},
+            {"abbrev": "PIT", "home_away": "home"}]}
+        by_date = {"2025-04-29": [ev], "2025-04-30": [ev]}
+        f = mj.fixture_for("KXMLBGAME-25APR30CHCPIT-PIT")
+        self.assertEqual(len(mj.candidate_events(f, by_date)), 1)
+
+
 class ProbabilityForYes(unittest.TestCase):
 
     def test_home_contract_takes_the_probability_as_is(self):
