@@ -32,7 +32,11 @@ decides that, not a number typed into a config file in advance.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import gzip
+import json
 import logging
+import os
 import sys
 import time
 
@@ -50,8 +54,9 @@ PAGINATION_CAP = 10
 OUTCOME_BACKFILL_SECONDS = 3600
 EXTRA_SERIES_SECONDS = 360
 
-# Non-weather series, collected generically: prices, displayed size and
-# outcomes, with no weather lookup and no rules extraction.
+# Non-weather series, collected generically: prices, displayed size,
+# outcomes and settlement text, with no weather lookup and no LLM rules
+# extraction.
 #
 # Chosen from a survey of all 14,163 series (analysis/survey_markets.py)
 # on the two criteria that actually decided every question tonight --
@@ -80,7 +85,52 @@ AMBIGUOUS_SETTLEMENT = (
     "KXTRUMPMENTION",    # whether specific words were said
     "KXHORMUZWEEKLY",    # a geopolitical condition someone has to adjudicate
 )
-EXTRA_SERIES = DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT
+
+# Player props, added after reading their actual contract text rather
+# than assuming. Two clauses put them in this group and not the one
+# above:
+#
+#   "If [player] records 3+ hits ..."  -- a HIT is an official scorer's
+#   ruling, not an observable fact. Hit or error is a judgment call, and
+#   it can be revised after the game has ended.
+#
+#   "If [player] is scratched or not included in the starting lineup,
+#   the market will resolve to the FAIR MARKET PRICE."  -- an outcome
+#   that is neither yes nor no, hanging on a lineup card posted an hour
+#   before first pitch.
+#
+# That is the Austin loss exactly: right about the world, wrong about
+# what the contract reads.
+#
+# Depth was measured before committing cycles to them, and it is better
+# than the settled sample implied -- 100% of these are quoted, at 2-7c
+# spreads with 150-230 contracts on the bid:
+#
+#   KXMLBHIT   200 open  100% quoted   5c   230 bid
+#   KXMLBHRR   200 open  100% quoted   4c   150 bid
+#   KXMLBKS    195 open  100% quoted   3c    25 bid
+#
+# Deliberately EXCLUDED after that measurement: KXEPLFIRSTGOAL (74c
+# spread), KXLALIGAFIRSTGOAL (88c), KXLALIGAGOAL (89c). All quoted with
+# ZERO on the bid, which is a displayed price with nothing behind it --
+# no signal to learn from, and a request per cycle forever to collect
+# it. Settlement-wise they are interesting; as data they are empty.
+AMBIGUOUS_PROPS = (
+    "KXMLBHIT", "KXMLBTB", "KXMLBHRR", "KXMLBRBI", "KXMLBSB",
+    "KXMLBKS", "KXMLBHR",
+    "KXWNBAPTS", "KXWNBAREB",
+    "KXEPLGOAL",
+)
+
+EXTRA_SERIES = DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT + AMBIGUOUS_PROPS
+
+# Settlement rules, written once per ticker to a gzipped file rather
+# than to a snapshot column. The text is static for a market's whole
+# life, so putting it in market_snapshots would repeat the same
+# paragraph every cycle for every market -- the duplication that already
+# cost 230 MB a day once. Files also keep the droplet flat and ride the
+# existing sync home.
+RULES_DIR = "data/market_rules"
 
 
 def kalshi_station_to_nws_id(station_code: str | None) -> str | None:
@@ -229,13 +279,69 @@ def _fp(market, key) -> float | None:
         return None
 
 
-def collect_generic_series(kalshi: KalshiClient, series_ticker: str) -> int:
-    """Record a non-weather series: prices, displayed size, terms.
+_rules_seen: set[str] = set()
 
-    No weather lookup and no LLM rules extraction. It stores what is
-    universally true of a market -- what it cost and how much was on the
-    book -- plus the settlement text verbatim, which the list endpoint
-    already returns and which is the part worth reading later.
+
+def record_rules(market: dict, series_ticker: str,
+                 directory: str = RULES_DIR) -> bool:
+    """Write a market's settlement text once, the first time it is seen.
+
+    This used to be claimed in a docstring and not actually done -- the
+    list endpoint returns rules_primary and rules_secondary on every
+    market and the collector dropped both. That is the single field that
+    separates "I was wrong about the game" from "I was wrong about what
+    the contract reads", and it disappears when the market does.
+
+    Returns True if this call wrote the market for the first time.
+    """
+    ticker = market.get("ticker")
+    if not ticker or ticker in _rules_seen:
+        return False
+    _rules_seen.add(ticker)
+
+    day = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    path = os.path.join(directory, series_ticker, f"{day}.jsonl.gz")
+    record = {
+        "ticker": ticker,
+        "series_ticker": series_ticker,
+        "event_ticker": market.get("event_ticker"),
+        "title": market.get("title"),
+        "yes_sub_title": market.get("yes_sub_title"),
+        "no_sub_title": market.get("no_sub_title"),
+        "rules_primary": market.get("rules_primary"),
+        "rules_secondary": market.get("rules_secondary"),
+        "strike_type": market.get("strike_type"),
+        "custom_strike": market.get("custom_strike"),
+        "market_type": market.get("market_type"),
+        "open_time": market.get("open_time"),
+        "close_time": market.get("close_time"),
+        "expiration_time": market.get("expiration_time"),
+        "settlement_timer_seconds": market.get("settlement_timer_seconds"),
+        "can_close_early": market.get("can_close_early"),
+        "early_close_condition": market.get("early_close_condition"),
+        "observed_ts": int(time.time()),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with gzip.open(path, "at", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":"),
+                                default=str) + "\n")
+        return True
+    except OSError as exc:
+        # Losing a rules write must not take the price collection down
+        # with it -- prices are perishable, and this file can be rebuilt
+        # from the next cycle.
+        log.warning("Rules write failed for %s (non-fatal): %s", ticker, exc)
+        _rules_seen.discard(ticker)
+        return False
+
+
+def collect_generic_series(kalshi: KalshiClient, series_ticker: str) -> int:
+    """Record a non-weather series: prices, displayed size, and terms.
+
+    No weather lookup and no LLM rules extraction -- but the settlement
+    text the list endpoint already returns IS now stored, once per
+    ticker, via record_rules().
     """
     found = []
     cursor = None
@@ -252,10 +358,13 @@ def collect_generic_series(kalshi: KalshiClient, series_ticker: str) -> int:
         return 0
 
     recorded = 0
+    new_rules = 0
     for market in found:
         ticker = market.get("ticker")
         if not ticker:
             continue
+        if record_rules(market, series_ticker):
+            new_rules += 1
         try:
             yes_ask = market_price_cents(market, "yes_ask")
             yes_bid = market_price_cents(market, "yes_bid")
@@ -286,7 +395,8 @@ def collect_generic_series(kalshi: KalshiClient, series_ticker: str) -> int:
         except Exception as exc:
             log.warning("Recording failed for %s (non-fatal): %s", ticker, exc)
     if recorded:
-        log.info("Series %s: %d markets recorded", series_ticker, recorded)
+        log.info("Series %s: %d markets recorded%s", series_ticker, recorded,
+                 f", {new_rules} new rules captured" if new_rules else "")
     return recorded
 
 
