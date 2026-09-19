@@ -48,6 +48,39 @@ log = logging.getLogger("collector")
 DEFAULT_CYCLE_SECONDS = 120
 PAGINATION_CAP = 10
 OUTCOME_BACKFILL_SECONDS = 3600
+EXTRA_SERIES_SECONDS = 360
+
+# Non-weather series, collected generically: prices, displayed size and
+# outcomes, with no weather lookup and no rules extraction.
+#
+# Chosen from a survey of all 14,163 series (analysis/survey_markets.py)
+# on the two criteria that actually decided every question tonight --
+# displayed depth and instance count -- with a third group added for the
+# thesis rather than the liquidity.
+#
+# The scale difference is not marginal. Weather's median thinnest bracket
+# leg showed ZERO contracts; NFL games show 71,825 at a 1.5c spread with
+# 100% of markets quoted. Weather does not appear in the exchange's top
+# 25 series by volume at all.
+DEEP_AND_LIQUID = (
+    # Deep books, tight spreads, and a fixture list that repeats forever,
+    # which is what a model needs and what rain markets never had.
+    "KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL",
+    "KXEPLGAME", "KXEPLSPREAD", "KXEPLTOTAL",
+    "KXLALIGAGAME", "KXLALIGATOTAL", "KXSERIEAGAME", "KXSERIEATOTAL",
+    "KXBUNDESLIGAGAME", "KXLIGUE1GAME",
+    "KXMLBGAME", "KXUFCFIGHT",
+)
+AMBIGUOUS_SETTLEMENT = (
+    # Where the project's actual thesis lives. Sports settle on "did the
+    # team win", which nobody misreads -- there is no CLI product, no
+    # trace, no gap between the event and the record of it. These are the
+    # opposite: the settlement SOURCE is the interesting part.
+    "KXRT",              # a published score, read at a particular moment
+    "KXTRUMPMENTION",    # whether specific words were said
+    "KXHORMUZWEEKLY",    # a geopolitical condition someone has to adjudicate
+)
+EXTRA_SERIES = DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT
 
 
 def kalshi_station_to_nws_id(station_code: str | None) -> str | None:
@@ -184,15 +217,93 @@ def _record_market(kalshi, extractor, market, ticker, weather_cache) -> int:
     return 1
 
 
+def _fp(market, key) -> float | None:
+    """Kalshi's fixed-point string fields. market.get('volume') is always
+    None -- the key is volume_fp and the value is a string."""
+    raw = market.get(key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_generic_series(kalshi: KalshiClient, series_ticker: str) -> int:
+    """Record a non-weather series: prices, displayed size, terms.
+
+    No weather lookup and no LLM rules extraction. It stores what is
+    universally true of a market -- what it cost and how much was on the
+    book -- plus the settlement text verbatim, which the list endpoint
+    already returns and which is the part worth reading later.
+    """
+    found = []
+    cursor = None
+    try:
+        for _ in range(PAGINATION_CAP):
+            resp = kalshi.get_markets(series_ticker=series_ticker,
+                                      status="open", cursor=cursor, limit=200)
+            found.extend(resp.get("markets", []))
+            cursor = resp.get("cursor")
+            if not cursor:
+                break
+    except Exception as exc:
+        log.warning("Fetch failed for %s: %s", series_ticker, exc)
+        return 0
+
+    recorded = 0
+    for market in found:
+        ticker = market.get("ticker")
+        if not ticker:
+            continue
+        try:
+            yes_ask = market_price_cents(market, "yes_ask")
+            yes_bid = market_price_cents(market, "yes_bid")
+            # Deliberately NOT log_price_snapshot as well. market_snapshots
+            # already carries yes_bid and yes_ask, so writing both doubles
+            # the row count for the same numbers -- and at 1,459 markets a
+            # cycle that duplication alone was 230 MB a day.
+            storage.log_market_snapshot(
+                ticker,
+                event_ticker=market.get("event_ticker"),
+                station_code=None,
+                measure=series_ticker,
+                yes_ask=yes_ask, yes_bid=yes_bid,
+                no_ask=market_price_cents(market, "no_ask"),
+                no_bid=market_price_cents(market, "no_bid"),
+                # Displayed size rides in the threshold columns rather
+                # than adding a table. Not elegant, but the alternative is
+                # a migration on a live database to bank data that is
+                # perishable -- a quote that was there this minute is not
+                # recoverable next week.
+                threshold_low_f=_fp(market, "yes_bid_size_fp"),
+                threshold_high_f=_fp(market, "yes_ask_size_fp"),
+                hours_until_close=None,
+                model_probability_yes=None,
+                close_time=market.get("close_time"),
+            )
+            recorded += 1
+        except Exception as exc:
+            log.warning("Recording failed for %s (non-fatal): %s", ticker, exc)
+    if recorded:
+        log.info("Series %s: %d markets recorded", series_ticker, recorded)
+    return recorded
+
+
 def run_cycle(kalshi: KalshiClient, extractor: RulesExtractor,
-              series_tickers) -> int:
+              series_tickers, extra_series=EXTRA_SERIES,
+              include_extra: bool = True) -> int:
     weather_cache: dict = {}
     total = 0
     for series_ticker in series_tickers:
         total += collect_series(kalshi, extractor, series_ticker, weather_cache)
-    log.info("Cycle complete: %d markets recorded across %d series, "
-             "%d station weather fetches", total, len(series_tickers),
-             len(weather_cache))
+    weather_total = total
+    for series_ticker in (extra_series if include_extra else ()):
+        total += collect_generic_series(kalshi, series_ticker)
+    log.info("Cycle complete: %d weather markets across %d series "
+             "(%d station fetches), %d other markets across %d series",
+             weather_total, len(series_tickers), len(weather_cache),
+             total - weather_total, len(extra_series))
     return total
 
 
@@ -225,10 +336,19 @@ def main() -> int:
              len(series))
 
     last_outcome_backfill = 0.0
+    last_extra = 0.0
     while True:
         started = time.time()
+        # Weather every cycle; the other families every EXTRA_INTERVAL.
+        # Those 1,459 markets are being banked for a model to train on
+        # later, not traded on now, so six-minute resolution loses
+        # nothing a tick feed cannot supply -- and at two minutes they
+        # alone were 230 MB a day.
+        do_extra = (time.time() - last_extra) >= EXTRA_SERIES_SECONDS
         try:
-            run_cycle(kalshi, extractor, series)
+            run_cycle(kalshi, extractor, series, include_extra=do_extra)
+            if do_extra:
+                last_extra = time.time()
         except Exception:
             log.exception("Cycle failed; continuing")
 
@@ -256,3 +376,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
