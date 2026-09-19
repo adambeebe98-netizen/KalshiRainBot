@@ -89,11 +89,32 @@ class Aliases(unittest.TestCase):
     def test_jacksonville_goes_kalshi_jac_to_espn_jax(self):
         self.assertEqual(mj.espn_code("JAC"), "JAX")
 
-    def test_aliases_do_not_point_at_each_other(self):
-        """An alias whose target is itself an alias key would chain."""
-        for source, target in mj.CODE_ALIASES.items():
-            self.assertNotIn(target, mj.CODE_ALIASES,
-                             f"{source}->{target} chains into another alias")
+    def test_aliases_do_not_chain_WITHIN_a_league(self):
+        """An alias whose target is a key in the SAME league chains.
+
+        Across leagues it is normal and must stay allowed: Bundesliga
+        maps BMU->MUN (Bayern) while EPL maps MUN->MAN (United). Those
+        are different teams and the same three letters.
+        """
+        for league, table in mj.LEAGUE_ALIASES.items():
+            for source, target in table.items():
+                self.assertNotIn(
+                    target, table,
+                    f"{league}: {source}->{target} chains into another alias")
+
+    def test_the_same_code_can_mean_different_teams_in_two_leagues(self):
+        self.assertEqual(mj.espn_code("MUN", "epl"), "MAN")
+        self.assertEqual(mj.espn_code("BMU", "bundesliga"), "MUN")
+
+    def test_an_unscoped_lookup_refuses_to_pick_between_leagues(self):
+        """With no league, a code two tables disagree about is left
+        alone rather than guessed."""
+        self.assertEqual(mj.espn_code("ARI"), "ARI")
+
+    def test_league_is_derived_from_the_series(self):
+        self.assertEqual(mj.league_for("KXNFLSPREAD"), "nfl")
+        self.assertEqual(mj.league_for("KXLALIGATOTAL"), "laliga")
+        self.assertIsNone(mj.league_for("KXRT"))
 
     def test_unknown_codes_pass_through_unchanged(self):
         self.assertEqual(mj.espn_code("HOU"), "HOU")
@@ -250,6 +271,129 @@ class MatchEventAt(unittest.TestCase):
 
     def test_no_candidates_is_none(self):
         self.assertIsNone(mj.match_event_at(self._fixture(), {}, 0))
+
+
+class ParseMarket(unittest.TestCase):
+    """The five ticker families, surveyed from real data."""
+
+    def test_winner(self):
+        m = mj.parse_market("KXNFLGAME-25JUL31LACDET-LAC")
+        self.assertEqual(m["kind"], "winner")
+        self.assertEqual(m["date"], "2025-07-31")
+        self.assertEqual(m["teams"], "LACDET")
+        self.assertEqual(m["side"], "LAC")
+        self.assertFalse(m["is_draw"])
+
+    def test_soccer_draw_is_flagged(self):
+        """Soccer is three-way. TIE is an outcome, not a team."""
+        m = mj.parse_market("KXEPLGAME-25MAY11NEWCHE-TIE")
+        self.assertEqual(m["kind"], "winner")
+        self.assertTrue(m["is_draw"])
+
+    def test_spread_carries_team_and_line(self):
+        m = mj.parse_market("KXNFLSPREAD-25AUG21NENYG-NE3",
+                            "New England wins by over 3.5 points")
+        self.assertEqual(m["kind"], "spread")
+        self.assertEqual(m["side"], "NE")
+        # The subtitle's 3.5 wins over the ticker's 3.
+        self.assertAlmostEqual(m["line"], 3.5)
+
+    def test_total_has_a_line_and_no_team(self):
+        m = mj.parse_market("KXNFLTOTAL-25AUG21NENYG-37",
+                            "Over 37.5 points scored")
+        self.assertEqual(m["kind"], "total")
+        self.assertIsNone(m["side"])
+        self.assertAlmostEqual(m["line"], 37.5)
+
+    def test_ticker_line_is_used_when_no_subtitle_is_given(self):
+        m = mj.parse_market("KXNFLTOTAL-25AUG21NENYG-37")
+        self.assertAlmostEqual(m["line"], 37.0,
+                               msg="no subtitle means no .5 to assume")
+
+    def test_prop_keeps_the_kickoff_time(self):
+        m = mj.parse_market("KXMLBHIT-26JUN271507TEXTOR-TORYPINANGO24-2",
+                            "Yohendrick Pinango: 2+")
+        self.assertEqual(m["kind"], "prop")
+        self.assertEqual(m["date"], "2026-06-27")
+        self.assertEqual(m["start_hhmm"], "1507",
+                         "the time separates doubleheaders")
+        self.assertEqual(m["teams"], "TEXTOR")
+
+    def test_game_number_suffix_is_captured(self):
+        """Real doubleheader format, from the archive: COLKCG1.
+
+        Eating the G into the team blob turns COL+KC into COLKCG, which
+        resolves to nothing -- and doubleheaders are exactly the games
+        that need distinguishing.
+        """
+        m = mj.parse_market("KXMLBGAME-25APR24COLKCG1-KC")
+        self.assertEqual(m["teams"], "COLKC")
+        self.assertEqual(m["game_no"], 1)
+        self.assertEqual(m["side"], "KC")
+
+    def test_bare_trailing_digit_also_reads_as_a_game_number(self):
+        m = mj.parse_market("KXMLBGAME-25APR16DETMIL2-DET")
+        self.assertEqual(m["teams"], "DETMIL")
+        self.assertEqual(m["game_no"], 2)
+
+    def test_a_team_blob_is_not_truncated_by_the_optional_suffix(self):
+        # NENYG ends in G with no digit after it; that G is Giants.
+        m = mj.parse_market("KXNFLSPREAD-25AUG21NENYG-NE3")
+        self.assertEqual(m["teams"], "NENYG")
+        self.assertIsNone(m["game_no"])
+
+    def test_non_fixture_series_return_none(self):
+        for ticker in ("KXRT-MER-27",
+                       "KXTRUMPMENTION-25APR02-GA",
+                       "KXHORMUZWEEKLY-26APR26-T90"):
+            self.assertIsNone(mj.parse_market(ticker), ticker)
+
+    def test_ufc_is_a_winner_market(self):
+        m = mj.parse_market("KXUFCFIGHT-25MAY10SAIPRE-PRE")
+        self.assertEqual(m["kind"], "winner")
+
+
+class FixtureForAllFamilies(unittest.TestCase):
+
+    KNOWN = {"NE", "NYG", "LAC", "DET", "TEX", "TOR", "CHI", "LAR"}
+
+    def test_spread_resolves_the_fixture(self):
+        f = mj.fixture_for("KXNFLSPREAD-25AUG21NENYG-NE3", self.KNOWN,
+                           "New England wins by over 3.5 points")
+        self.assertEqual((f["away"], f["home"]), ("NE", "NYG"))
+        self.assertEqual(f["kind"], "spread")
+        self.assertAlmostEqual(f["line"], 3.5)
+        self.assertFalse(f["yes_is_home"], "NE is away here")
+
+    def test_total_resolves_without_a_team_to_anchor_on(self):
+        f = mj.fixture_for("KXNFLTOTAL-25AUG21NENYG-37", self.KNOWN,
+                           "Over 37.5 points scored")
+        self.assertEqual((f["away"], f["home"]), ("NE", "NYG"))
+        self.assertIsNone(f["yes_is_home"],
+                          "a total belongs to the game, not a side")
+
+    def test_draw_resolves_the_fixture_but_has_no_side(self):
+        known = {"NEW", "CHE"}
+        f = mj.fixture_for("KXEPLGAME-25MAY11NEWCHE-TIE", known)
+        self.assertEqual((f["away"], f["home"]), ("NEW", "CHE"))
+        self.assertTrue(f["is_draw"])
+        self.assertIsNone(f["yes_is_home"],
+                          "the draw belongs to neither team")
+
+    def test_prop_resolves_via_its_team_prefix(self):
+        f = mj.fixture_for("KXMLBHIT-26JUN271507TEXTOR-TORYPINANGO24-2",
+                           self.KNOWN, "Yohendrick Pinango: 2+")
+        self.assertEqual((f["away"], f["home"]), ("TEX", "TOR"))
+        self.assertEqual(f["kind"], "prop")
+
+    def test_winner_markets_still_work_unchanged(self):
+        f = mj.fixture_for("KXNFLGAME-26JAN18LACHI-LA")
+        self.assertEqual((f["away"], f["home"]), ("LA", "CHI"))
+        self.assertEqual(f["espn_away"], "LAR")
+        self.assertFalse(f["yes_is_home"])
+
+    def test_non_fixture_series_are_none(self):
+        self.assertIsNone(mj.fixture_for("KXRT-MER-27", self.KNOWN))
 
 
 class CandidateEvents(unittest.TestCase):
