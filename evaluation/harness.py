@@ -67,8 +67,8 @@ class CandidateReport:
                  f"best-of-{self.trials_to_date} reaches SR "
                  f"{self.luck_threshold:.3f} by luck alone",
                  self.result.summary()]
-        for name, res in sorted(self.baseline_results.items()):
-            lines.append(f"  baseline {name}: {res.summary()}")
+        for _, res in sorted(self.baseline_results.items()):
+            lines.append(f"  baseline {res.summary()}")
         dsr = ("n/a" if self.dsr_probability is None
                else f"{self.dsr_probability:.4f}")
         boot = ("n/a" if self.bootstrap_p_at_or_below_zero is None
@@ -188,7 +188,12 @@ def evaluate(candidate, markets: list[dict], execution_model: ExecutionModel,
         # window, which is the whole thing the fold structure prevents.
         for trader in baselines_mod.standard_baselines(
                 fold.train_tickers, db_path=db_path):
-            baseline_folds.setdefault(trader.name, []).append(
+            # Keyed by kind, not name. The constant baseline is refit per
+            # fold so its name carries a different fitted value each time;
+            # keying on the name split one baseline into three partial
+            # ones, each holding a third of the trades and each a far
+            # easier target than the pooled baseline actually is.
+            baseline_folds.setdefault(trader.kind, []).append(
                 _run_one(trader, fold, execution_model, horizons_s, db_path,
                          label=f"{trader.name} fold {fold.index}",
                          price_cache=cache))

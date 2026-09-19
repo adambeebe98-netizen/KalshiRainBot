@@ -40,6 +40,13 @@ class Forecaster:
 
     name: str = "unnamed"
 
+    # A stable identifier, unlike `name`, which may embed a fitted value.
+    # The harness groups fold results by `kind`: the constant baseline is
+    # refit per fold, so its name differs per fold, and keying on the name
+    # split one baseline into several partial ones -- each with a fraction
+    # of the trades, and each an easier target than the real thing.
+    kind: str = "unnamed"
+
     def probability(self, view, terms, as_of: int) -> float | None:
         raise NotImplementedError
 
@@ -59,6 +66,7 @@ class MarketForecaster(Forecaster):
     """
 
     name = "market_price"
+    kind = "market_price"
 
     def probability(self, view, terms, as_of: int) -> float | None:
         points = view.price_points(terms.ticker)
@@ -112,6 +120,7 @@ class ConstantBaseRateForecaster(Forecaster):
         self.rate = rate
         self.fitted_on = fitted_on
         self.name = f"constant_base_rate({rate:.4f})"
+        self.kind = "constant_base_rate"
 
     @classmethod
     def fit(cls, train_tickers, db_path: str | None = None):
@@ -150,6 +159,7 @@ class HeuristicBaseline(Forecaster):
     """
 
     name = "best_heuristic"
+    kind = "best_heuristic"
 
     def probability(self, view, terms, as_of: int) -> float | None:
         raise NotImplementedError(
@@ -190,6 +200,10 @@ class ProbabilityTrader:
     @property
     def name(self) -> str:
         return self.forecaster.name
+
+    @property
+    def kind(self) -> str:
+        return self.forecaster.kind
 
     def decide(self, view, terms, as_of: int) -> Decision:
         abstain = Decision(terms.ticker, "yes", 0, as_of)
