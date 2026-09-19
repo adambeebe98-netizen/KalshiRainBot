@@ -197,6 +197,28 @@ class TestRandomStrategiesShowNoEdge(AcceptanceTestCase):
 class TestOracleIsDetected(AcceptanceTestCase):
     """The inverse. A harness that rejects everything is also broken."""
 
+    def test_an_oracle_actually_PASSES(self):
+        """The gap this closes.
+
+        The other oracle test only asserted the oracle was profitable and
+        beat the baselines, which a harness that rejects everything also
+        satisfies. It did happen: after a 525-candidate sweep, a plain
+        standard deviation over the recorded Sharpes -- inflated by
+        candidates with three trades posting Sharpes in the hundreds --
+        put the luck threshold at SR 57, and nothing could clear SR 57.
+        The harness had become a reject-everything machine and every test
+        still passed.
+
+        So this asserts the verdict itself. A harness that cannot pass a
+        strategy which literally knows the answer is broken, however
+        safe its refusals look.
+        """
+        report = self.evaluate(OracleTrader(self.db))
+        self.assertTrue(report.verdict.passed,
+                        "an oracle with the settled outcome in hand failed "
+                        "the gates -- the harness rejects everything:\n"
+                        + report.report())
+
     def test_a_strategy_that_knows_the_answer_is_wildly_profitable(self):
         report = self.evaluate(OracleTrader(self.db))
         self.assertGreater(report.result.net_pnl_cents, 0,

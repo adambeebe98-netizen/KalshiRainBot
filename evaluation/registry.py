@@ -339,13 +339,36 @@ def observed_sharpe_variance(db_path: str | None = None,
     Floored, because a handful of early trials can produce a near-zero
     variance that would make the luck threshold vanish exactly when the
     sample is too small to trust.
+
+    Estimated robustly, via the median absolute deviation, and NOT with a
+    standard deviation. This is not a refinement -- a plain stdev broke
+    the harness outright. A candidate that filled three trades can post a
+    Sharpe in the hundreds, and after a 525-candidate sweep the variance
+    came out at 325, putting the luck threshold at SR 57. Nothing can
+    clear SR 57, so the harness had silently become a machine that
+    rejects everything, which is exactly as useless as one that accepts
+    everything and much harder to notice.
+
+    MAD ignores those outliers instead of being dominated by them. The
+    1.4826 factor makes it agree with the standard deviation for normally
+    distributed data, so the scale still means what it used to.
     """
     with closing(_connect(db_path)) as conn:
         values = [r[0] for r in conn.execute(
             "SELECT net_sharpe FROM eval_trials WHERE net_sharpe IS NOT NULL")]
+    values = [v for v in values if v is not None and abs(v) < 1e6]
     if len(values) < 2:
         return minimum
-    return max(minimum, stats.stdev(values) ** 2)
+    ordered = sorted(values)
+    median = ordered[len(ordered) // 2]
+    deviations = sorted(abs(v - median) for v in values)
+    mad = deviations[len(deviations) // 2]
+    scale = 1.4826 * mad
+    if scale <= 0:
+        # Every trial scored identically -- fall back rather than return
+        # a zero threshold, which would let anything through.
+        scale = stats.stdev(values)
+    return max(minimum, scale ** 2)
 
 
 def luck_threshold(n_trials: int | None = None,
