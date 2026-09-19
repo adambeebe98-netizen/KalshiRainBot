@@ -109,12 +109,30 @@ class TestGetGitCommit(unittest.TestCase):
             result = bot.get_git_commit()
         self.assertIsNone(result)
 
-    def test_real_environment_returns_none_gracefully_when_not_a_git_checkout(self):
-        """Direct, unmocked confirmation: this test file's own directory
-        is not a git checkout, so the real function (no mocking) must
-        return None cleanly rather than raising."""
+    def test_real_environment_never_raises_whatever_it_finds(self):
+        """Unmocked confirmation that the real function behaves in the
+        real environment.
+
+        It asserts a shape, not a value. The previous version of this test
+        asserted None on the grounds that "this test file's own directory
+        is not a git checkout" -- which stopped being true the moment the
+        code lived in the repo it was reading, and which was never the
+        directory being checked anyway (get_git_commit uses bot.py's
+        directory, not the test's). It failed on every run for weeks.
+
+        A suite that can never go green is worse than a missing test: it
+        trains everyone to skim past failures, and the next real one goes
+        unnoticed. The graceful-failure behaviour it was reaching for is
+        already covered by the two mocked tests above, which exercise it
+        deterministically instead of depending on where the code happens
+        to be checked out.
+        """
         result = bot.get_git_commit()
-        self.assertIsNone(result)
+        if result is not None:
+            self.assertIsInstance(result, str)
+            self.assertTrue(result.strip(), "an empty string is not a commit")
+            self.assertLess(len(result), 41, "expected a short SHA")
+            int(result, 16)   # raises if it is not hexadecimal
 
 
 if __name__ == "__main__":

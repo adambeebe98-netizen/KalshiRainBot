@@ -105,6 +105,19 @@ def default_sources(candle_publish_lag_s: int = DEFAULT_CANDLE_PUBLISH_LAG_S
         "forecast_history": Source(
             "forecast_history", Availability.DECLARED, "ts",
             rationale="our own write time is an upper bound on receipt"),
+        "wx_observations": Source(
+            "wx_observations", Availability.DECLARED, "available_at",
+            rationale="IEM ASOS observations, stamped at valid_at plus a "
+                      "declared lag of at least the measured p90 (25 min). "
+                      "Pessimistic by construction."),
+        "wx_forecasts": Source(
+            "wx_forecasts", Availability.DECLARED, "available_at",
+            rationale="Open-Meteo previous runs. available_at is "
+                      "valid_at minus the lead time, which is what the "
+                      "API's own definition of previous_dayN means -- "
+                      "arithmetic rather than an estimate, and the "
+                      "strongest availability claim in this catalog short "
+                      "of a recorded receipt."),
         "historical_weather_points": Source(
             "historical_weather_points", Availability.UNKNOWN, "ts",
             rationale="no forecast issue time; revisions dropped by INSERT "
@@ -314,6 +327,17 @@ class PointInTimeView:
 
     def weather_obs(self, station_code: str) -> list[dict]:
         return self._rows("realtime_weather_obs", "station_code = ?", (station_code,))
+
+    def observations(self, station: str) -> list[dict]:
+        """IEM observations available at as_of -- the instrument the rain
+        contracts settle on."""
+        return self._rows("wx_observations", "station = ?", (station,))
+
+    def forecasts_at_lead(self, station: str, lead_hours: int) -> list[dict]:
+        """Forecasts for this station issued at a given lead time, filtered
+        to those already available at as_of."""
+        return self._rows("wx_forecasts", "station = ? AND lead_hours = ?",
+                           (station, lead_hours))
 
     def weather_points(self, station_code: str) -> list[dict]:
         """UNKNOWN availability -- refused unless the view was built with
