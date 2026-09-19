@@ -165,6 +165,39 @@ class TestDecisionPruning(MaintenanceTestCase):
         self.assertEqual(out["remaining"], 55)
 
 
+class TestObservationRefresh(MaintenanceTestCase):
+    def test_walks_every_station_in_use(self):
+        from unittest import mock
+        calls = []
+
+        def fake_backfill(station, start, end, **kw):
+            calls.append(station)
+            return {"inserted": 7}
+
+        with mock.patch("weather_archive.stations_in_use",
+                        return_value=["NYC", "AUS"]), \
+                mock.patch("weather_archive.backfill_station", fake_backfill):
+            out = maintenance.refresh_observations(days_back=2, db_path=self.db)
+        self.assertEqual(sorted(calls), ["AUS", "NYC"])
+        self.assertEqual(out["inserted"], 14)
+
+    def test_one_station_failing_does_not_abort_the_rest(self):
+        from unittest import mock
+
+        def flaky(station, start, end, **kw):
+            if station == "NYC":
+                raise RuntimeError("boom")
+            return {"inserted": 3}
+
+        with mock.patch("weather_archive.stations_in_use",
+                        return_value=["NYC", "AUS"]), \
+                mock.patch("weather_archive.backfill_station", flaky):
+            out = maintenance.refresh_observations(db_path=self.db)
+        self.assertEqual(out["inserted"], 3)
+        self.assertEqual(len(out["failures"]), 1)
+        self.assertIn("NYC", out["failures"][0])
+
+
 class TestReport(MaintenanceTestCase):
     def test_renders_sizes_and_counts(self):
         text = maintenance.report(db_path=self.db, archive_dir=self.archive_dir)

@@ -117,6 +117,40 @@ def prune_decisions(keep_days: int = DEFAULT_DECISION_KEEP_DAYS,
             "traded_kept": traded_after, "cutoff": cutoff}
 
 
+def refresh_observations(days_back: int = 3, db_path: str | None = None) -> dict:
+    """Top up observed weather from IEM for every station in use.
+
+    This is what keeps the precipitation gap closed going forward. The
+    live NWS poller cannot do it -- `precipitationLastHour` is absent from
+    that API's payload for these stations, which is why `precip_last_hour_mm`
+    is NULL on every row it has ever written. Backfilling history without
+    this would have fixed the past and left the present broken.
+
+    A rolling few days rather than only yesterday, because ASOS
+    observations are occasionally corrected after the fact and INSERT OR
+    IGNORE makes re-fetching free.
+    """
+    import datetime as dt
+    import weather_archive
+
+    # Tomorrow, not today. IEM's day range excludes its end date, so
+    # asking for [today-3, today] silently stops at yesterday and the
+    # archive sits permanently a day behind -- which is invisible unless
+    # someone checks how stale the newest row is.
+    end = dt.date.today() + dt.timedelta(days=1)
+    start = end - dt.timedelta(days=days_back + 1)
+    inserted = 0
+    failures = []
+    for station in weather_archive.stations_in_use(db_path):
+        try:
+            out = weather_archive.backfill_station(
+                station, start, end, db_path=db_path, sleep_between=1.0)
+            inserted += out["inserted"]
+        except Exception as exc:
+            failures.append(f"{station}: {type(exc).__name__}")
+    return {"inserted": inserted, "days": days_back, "failures": failures}
+
+
 def checkpoint_wal(db_path: str | None = None) -> dict:
     conn = _connect(db_path)
     try:
@@ -163,10 +197,14 @@ def main() -> int:
     parser.add_argument("--prune-decisions", action="store_true")
     parser.add_argument("--keep-days", type=int, default=DEFAULT_DECISION_KEEP_DAYS)
     parser.add_argument("--checkpoint", action="store_true")
+    parser.add_argument("--refresh-observations", action="store_true")
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
 
     print(report())
+    if args.refresh_observations or args.all:
+        print("\ntopping up observed weather from IEM...")
+        print(" ", refresh_observations())
     if args.archive_legacy or args.all:
         print("\narchiving legacy raw messages...")
         print(" ", archive_legacy_raw_json())
