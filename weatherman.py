@@ -108,14 +108,40 @@ def station_windows(station: str, start_ts: int, end_ts: int,
 
 @dataclass
 class ArchiveCache:
-    """Everything one station needs, loaded once.
+    """Everything one station needs, loaded once and indexed for slicing.
 
-    Building features market-by-market against SQLite was what made the
-    acceptance sweep take minutes; the same lesson applies here.
+    The dicts are kept because callers build them directly in tests and
+    the adapter, but every window query goes through a sorted index and
+    bisect. Scanning the whole dict per window was O(n) per window --
+    about 18,000 entries times 730 windows times 23 stations, which is
+    300 million operations and turned training into something that timed
+    out rather than finished.
     """
     obs: dict[int, float] = field(default_factory=dict)
     fc_precip: dict[int, float] = field(default_factory=dict)
     fc_pop: dict[int, float] = field(default_factory=dict)
+    _index: dict = field(default_factory=dict, repr=False)
+
+    def _sorted(self, name: str):
+        source = getattr(self, name)
+        cached = self._index.get(name)
+        if cached is None or cached[2] != len(source):
+            keys = sorted(source)
+            cached = (keys, [source[k] for k in keys], len(source))
+            self._index[name] = cached
+        return cached[0], cached[1]
+
+    def between(self, name: str, lo: int, hi: int) -> list[float]:
+        """Values whose timestamp falls in [lo, hi)."""
+        import bisect
+        keys, values = self._sorted(name)
+        return values[bisect.bisect_left(keys, lo):bisect.bisect_left(keys, hi)]
+
+    def pairs_between(self, name: str, lo: int, hi: int):
+        import bisect
+        keys, values = self._sorted(name)
+        i, j = bisect.bisect_left(keys, lo), bisect.bisect_left(keys, hi)
+        return zip(keys[i:j], values[i:j])
 
     @classmethod
     def load(cls, station: str, lead_hours: int, db_path: str | None = None):
@@ -147,16 +173,15 @@ def features_for(cache: ArchiveCache, lo: int, hi: int, climo: float,
     dry.
     """
     cutoff = lo   # the decision moment
-    fc_hours = [v for t, v in cache.fc_precip.items()
-                if lo <= t < hi and (t - lead_hours * HOUR) <= cutoff]
+    fc_hours = [v for t, v in cache.pairs_between("fc_precip", lo, hi)
+                if (t - lead_hours * HOUR) <= cutoff]
     if not fc_hours:
         return None
-    pops = [v for t, v in cache.fc_pop.items()
-            if lo <= t < hi and (t - lead_hours * HOUR) <= cutoff]
+    pops = [v for t, v in cache.pairs_between("fc_pop", lo, hi)
+            if (t - lead_hours * HOUR) <= cutoff]
 
-    prior_24 = sum(v for t, v in cache.obs.items() if lo - DAY <= t < lo)
-    prior_wet_72 = sum(1 for t, v in cache.obs.items()
-                       if lo - 3 * DAY <= t < lo and v > 0)
+    prior_24 = sum(cache.between("obs", lo - DAY, lo))
+    prior_wet_72 = sum(1 for v in cache.between("obs", lo - 3 * DAY, lo) if v > 0)
 
     when = dt.datetime.fromtimestamp(lo, dt.timezone.utc)
     doy = when.timetuple().tm_yday
@@ -182,7 +207,7 @@ def label_for_window(cache: ArchiveCache, lo: int, hi: int) -> float | None:
     None when the window has no observations at all -- an unobserved day
     is not a dry day.
     """
-    hours = [v for t, v in cache.obs.items() if lo <= t < hi]
+    hours = cache.between("obs", lo, hi)
     if not hours:
         return None
     return 1.0 if sum(hours) > 0 else 0.0
@@ -289,7 +314,7 @@ class LogisticModel:
 
 
 def fit(rows: list[list[float]], labels: list[float], *,
-        iterations: int = 3000, learning_rate: float = 0.3,
+        iterations: int = 600, learning_rate: float = 1.0,
         l2: float = 1e-3) -> LogisticModel:
     """Standardise, then batch gradient descent on the log loss.
 
