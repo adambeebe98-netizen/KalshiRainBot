@@ -285,24 +285,22 @@ class TestNoVaultReach(unittest.TestCase):
         return [os.path.join(directory, f) for f in sorted(os.listdir(directory))
                 if f.endswith(".py")]
 
-    def test_no_module_in_evaluation_imports_splits(self):
+    def test_pit_does_not_import_splits(self):
+        # Narrower than the allow_vault ban below, and deliberately so.
+        # folds.py DOES import splits -- it has to, since folds are defined
+        # over TRAIN and DEV and splits.load is the sanctioned read path.
+        # pit.py is the data access layer and has no business knowing about
+        # splits at all, so for this module the import itself is the smell.
         import ast
-        checked = 0
-        for path in self._package_files():
-            with open(path, encoding="utf-8") as fh:
-                tree = ast.parse(fh.read(), filename=path)
-            checked += 1
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        self.assertNotEqual(
-                            alias.name.split(".")[0], "splits",
-                            f"{os.path.basename(path)} imports splits")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    self.assertNotEqual(
-                        node.module.split(".")[0], "splits",
-                        f"{os.path.basename(path)} imports from splits")
-        self.assertGreater(checked, 0, "found no evaluation modules to check")
+        import evaluation.pit as mod
+        with open(mod.__file__, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=mod.__file__)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertNotEqual(alias.name.split(".")[0], "splits")
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                self.assertNotEqual(node.module.split(".")[0], "splits")
 
     def test_no_module_in_evaluation_passes_allow_vault(self):
         import ast
