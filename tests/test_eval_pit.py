@@ -152,6 +152,63 @@ class TestTheCoreProperty(PitTestCase):
                             for r in self.view(4000).forecasts("MKT-A")))
 
 
+class TestPriceCacheIsFaithful(PitTestCase):
+    """The cache shares the fetch, never the filter. If these diverge, a
+    cached run can see rows an uncached one cannot, which is the exact
+    failure the whole module exists to prevent."""
+
+    def test_cached_and_uncached_agree_at_every_as_of(self):
+        cache = pit.PriceCache(["MKT-A"], db_path=self.db)
+        for as_of in (0, 500, 1000, 1500, 3000, 5000, 9999, 10_000, 99_999):
+            plain = self.view(as_of).price_points("MKT-A")
+            cached = pit.PointInTimeView(
+                as_of, sources=["historical_price_points"],
+                db_path=self.db, price_cache=cache).price_points("MKT-A")
+            self.assertEqual([r["ts"] for r in plain], [r["ts"] for r in cached],
+                             f"cache diverged from SQL at as_of={as_of}")
+
+    def test_cache_respects_the_publish_lag(self):
+        cache = pit.PriceCache(["MKT-A"], db_path=self.db)
+        for lag in (0, 500, 1500):
+            plain = pit.PointInTimeView(
+                3000, sources=["historical_price_points"], db_path=self.db,
+                candle_publish_lag_s=lag).price_points("MKT-A")
+            cached = pit.PointInTimeView(
+                3000, sources=["historical_price_points"], db_path=self.db,
+                candle_publish_lag_s=lag,
+                price_cache=cache).price_points("MKT-A")
+            self.assertEqual([r["ts"] for r in plain], [r["ts"] for r in cached],
+                             f"cache diverged from SQL at lag={lag}")
+
+    def test_cache_returns_nothing_for_an_unknown_ticker(self):
+        cache = pit.PriceCache(["MKT-A"], db_path=self.db)
+        v = pit.PointInTimeView(9999, sources=["historical_price_points"],
+                                db_path=self.db, price_cache=cache)
+        self.assertEqual(v.price_points("NOT-CACHED"), [])
+
+    def test_cache_still_honours_source_declaration(self):
+        cache = pit.PriceCache(["MKT-A"], db_path=self.db)
+        v = pit.PointInTimeView(9999, sources=["market_snapshots"],
+                                db_path=self.db, price_cache=cache)
+        with self.assertRaises(pit.SourceNotDeclaredError):
+            v.price_points("MKT-A")
+
+
+class TestBatchLabels(PitTestCase):
+    def test_batch_matches_one_at_a_time(self):
+        tickers = ["MKT-A", "MKT-LATER", "MKT-SCALAR", "NOPE"]
+        batch = pit.labels_for(tickers, db_path=self.db)
+        for t in tickers:
+            one = pit.label_for(t, db_path=self.db)
+            if one is None:
+                self.assertNotIn(t, batch)
+            else:
+                self.assertEqual(batch[t], one)
+
+    def test_empty_input_is_empty_output(self):
+        self.assertEqual(pit.labels_for([], db_path=self.db), {})
+
+
 class TestTheLabelIsUnreachable(PitTestCase):
     def test_view_has_no_label_accessor(self):
         v = self.view(5000)

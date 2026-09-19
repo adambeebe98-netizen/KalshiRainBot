@@ -168,6 +168,42 @@ CREATE TABLE IF NOT EXISTS eval_unverified_access (
 """
 
 
+class PriceCache:
+    """Prefetched candles for a set of tickers, shared across many views.
+
+    Purely a cost fix. A backtest builds one view per decision, and each
+    view re-queried the same immutable candle rows -- the acceptance sweep
+    spent minutes opening SQLite connections.
+
+    Crucially this shares only the FETCH. The availability filter still
+    runs inside PointInTimeView, using the same arithmetic as the SQL
+    path, so caching cannot widen what a candidate can see. A test asserts
+    cached and uncached views return identical rows for the same as_of.
+    """
+
+    def __init__(self, tickers, db_path: str | None = None):
+        self._by_ticker: dict[str, list[dict]] = {}
+        wanted = list(dict.fromkeys(tickers))
+        if not wanted:
+            return
+        conn = sqlite3.connect(db_path or SETTINGS.db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.row_factory = sqlite3.Row
+        try:
+            for i in range(0, len(wanted), 500):
+                chunk = wanted[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in conn.execute(
+                        f"SELECT * FROM historical_price_points "
+                        f"WHERE ticker IN ({marks}) ORDER BY ts", chunk):
+                    self._by_ticker.setdefault(row["ticker"], []).append(dict(row))
+        finally:
+            conn.close()
+
+    def rows(self, ticker: str) -> list[dict]:
+        return self._by_ticker.get(ticker, [])
+
+
 class PointInTimeView:
     """A read-only window onto the database as it stood at `as_of`.
 
@@ -181,7 +217,8 @@ class PointInTimeView:
     def __init__(self, as_of: int, sources: list[str] | None = None,
                  db_path: str | None = None,
                  candle_publish_lag_s: int = DEFAULT_CANDLE_PUBLISH_LAG_S,
-                 allow_unverified: bool = False, reason: str | None = None):
+                 allow_unverified: bool = False, reason: str | None = None,
+                 price_cache: "PriceCache | None" = None):
         if not isinstance(as_of, int):
             raise TypeError(f"as_of must be a unix int, got {type(as_of).__name__}")
         if allow_unverified and not (reason and reason.strip()):
@@ -207,6 +244,7 @@ class PointInTimeView:
                 f"no availability policy for: {unknown_names}. Add a Source "
                 f"with an explicit policy rather than querying it untyped.")
         self.sources = list(declared)
+        self.price_cache = price_cache
 
     # -- plumbing ---------------------------------------------------------
 
@@ -255,6 +293,14 @@ class PointInTimeView:
     # -- accessors --------------------------------------------------------
 
     def price_points(self, ticker: str) -> list[dict]:
+        if self.price_cache is not None:
+            src = self._check("historical_price_points")
+            cutoff = self.as_of - src.lag_seconds
+            # Same arithmetic as the SQL path: available_at = ts + lag, and
+            # available_at <= as_of. Rearranged so the comparison is on the
+            # stored column rather than on a computed one.
+            return [r for r in self.price_cache.rows(ticker)
+                    if r["ts"] <= cutoff]
         return self._rows("historical_price_points", "ticker = ?", (ticker,))
 
     def snapshots(self, ticker: str) -> list[dict]:
@@ -344,6 +390,44 @@ class Label:
     result: str                 # 'yes' or 'no'
     expiration_value: float | None
     available_at: int           # close_time; when the outcome became known
+
+
+def labels_for(tickers, db_path: str | None = None) -> dict[str, Label]:
+    """Batch version of label_for, same rules and same restriction.
+
+    One query instead of one per ticker. Purely a cost fix: the harness
+    resolves a whole fold's labels at once, and opening a connection per
+    market made the acceptance sweep take minutes rather than seconds.
+    """
+    wanted = list(dict.fromkeys(tickers))
+    if not wanted:
+        return {}
+    path = db_path or SETTINGS.db_path
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.row_factory = sqlite3.Row
+    out: dict[str, Label] = {}
+    try:
+        # Chunked to stay under SQLite's variable limit.
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT ticker, result, expiration_value, close_time "
+                f"FROM historical_markets WHERE ticker IN ({marks})", chunk)
+            for row in rows:
+                if row["result"] not in ("yes", "no"):
+                    continue
+                closed = iso_to_epoch(row["close_time"])
+                if closed is None:
+                    continue
+                out[row["ticker"]] = Label(
+                    ticker=row["ticker"], result=row["result"],
+                    expiration_value=row["expiration_value"],
+                    available_at=closed)
+    finally:
+        conn.close()
+    return out
 
 
 def label_for(ticker: str, db_path: str | None = None) -> Label | None:

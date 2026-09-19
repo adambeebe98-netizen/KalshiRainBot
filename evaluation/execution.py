@@ -175,7 +175,8 @@ class HourlyCandleExecution(ExecutionModel):
         from evaluation.pit import PointInTimeView
         forward = PointInTimeView(
             earliest + self.MAX_LOOKAHEAD_S,
-            sources=["historical_price_points"], db_path=view.db_path)
+            sources=["historical_price_points"], db_path=view.db_path,
+            price_cache=getattr(view, "price_cache", None))
         future = [c for c in forward.price_points(decision.ticker)
                   if c["ts"] > earliest]
         if not future:
