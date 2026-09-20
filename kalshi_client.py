@@ -221,6 +221,113 @@ class KalshiClient:
             params={"start_ts": start_ts, "end_ts": end_ts, "period_interval": period_interval},
         )
 
+    def get_trades(self, ticker: Optional[str] = None,
+                    cursor: Optional[str] = None, limit: int = 1000,
+                    min_ts: Optional[int] = None,
+                    max_ts: Optional[int] = None) -> dict:
+        """
+        Every EXECUTED trade — the actual transaction record, which is
+        strictly more informative than any candlestick built from it.
+
+        A candle says the hour closed at 20c. A trade says 467 contracts
+        went through at 99c at 03:58:51.909084Z and the TAKER was on the
+        no side. That difference is the whole "could I actually have been
+        filled" question, which is what every rejected candidate so far
+        has actually foundered on — an edge measured against a price
+        nobody was transacting at is not an edge.
+
+        Fields, confirmed against live responses:
+            created_time        microsecond ISO timestamp
+            count_fp            size, as a fixed-point STRING ("467.00").
+                                There is no plain "count" field; reading
+                                one yields zero contracts for every trade.
+            yes_price_dollars   dollar string, same convention as
+            no_price_dollars    everywhere else in this API
+            taker_side          which side crossed the spread
+            taker_outcome_side  the outcome that taker bought
+            taker_book_side     'bid' or 'ask'
+            is_block_trade      negotiated block rather than book fill
+            trade_id            stable identifier, so re-fetching a range
+                                de-duplicates cleanly
+
+        This is the LIVE endpoint and it only answers for markets inside
+        Kalshi's live/historical cutoff — a market that settled last
+        season returns an empty list here, NOT an error. Use
+        get_historical_trades() for those.
+        """
+        params: dict = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if cursor:
+            params["cursor"] = cursor
+        if min_ts is not None:
+            params["min_ts"] = min_ts
+        if max_ts is not None:
+            params["max_ts"] = max_ts
+        return self._request("GET", "/markets/trades", params=params)
+
+    def get_historical_trades(self, ticker: Optional[str] = None,
+                               cursor: Optional[str] = None,
+                               limit: int = 1000) -> dict:
+        """
+        The same trade record for markets PAST the live/historical
+        cutoff — which is to say, nearly everything worth studying.
+
+        This endpoint is the reason a whole conclusion had to be
+        withdrawn. Probing only /markets/trades showed empty results for
+        anything older than about three months, which looked exactly
+        like a rolling window quietly discarding history, and was
+        reported as the one data gap with a deadline. It is not: the
+        trade log follows the same live/historical split as /markets and
+        /candlesticks, and the archive is complete.
+
+        Verified on markets the live endpoint returns nothing for:
+            KXRAINNYC-26APR07-T0   444 trades, 320,445 contracts
+            KXRAINNYC-25DEC28-T0    83 trades
+            KXNFLGAME-26JAN18LACHI-CHI  129,847 contracts
+
+        Same field shapes as get_trades().
+        """
+        params: dict = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/historical/trades", params=params)
+
+    def get_event(self, event_ticker: str) -> dict:
+        """
+        One event and every market under it.
+
+        Worth having because bracket membership is currently RECOVERED
+        BY PARSING TICKER STRINGS — market_join.py splits a concatenated
+        fixture blob and guesses where one team code ends and the next
+        begins. Kalshi simply states the grouping, and a stated fact
+        beats a parsed one.
+        """
+        return self._request("GET", f"/events/{event_ticker}")
+
+    def get_series(self, series_ticker: str) -> dict:
+        """
+        Series metadata: settlement sources, frequency, category.
+
+        The settlement SOURCE is the field this whole project turns on —
+        knowing a rain market reads one particular gauge is the
+        difference between being right about the weather and being right
+        about the contract.
+        """
+        return self._request("GET", f"/series/{series_ticker}")
+
+    def get_exchange_schedule(self) -> dict:
+        """
+        Trading hours and maintenance windows.
+
+        Distinguishes "nobody was quoting this market" from "the
+        exchange was closed", which otherwise look identical in the
+        archive and would be silently modelled as illiquidity.
+        """
+        return self._request("GET", "/exchange/schedule")
+
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
         return self._request("GET", f"/markets/{ticker}/orderbook", params={"depth": depth})
 
