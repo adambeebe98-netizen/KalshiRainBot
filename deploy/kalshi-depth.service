@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi order-book depth capture (live-only, cannot be backfilled)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/kalshi_weather_bot
+Environment=PYTHONPATH=/root/kalshi_weather_bot
+ExecStart=/root/kalshi_weather_bot/venv/bin/python -u depth_poller.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/root/kalshi_weather_bot/depth.log
+StandardError=append:/root/kalshi_weather_bot/depth.log
+
+[Install]
+WantedBy=multi-user.target

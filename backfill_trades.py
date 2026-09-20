@@ -42,12 +42,29 @@ import json
 import os
 import time
 
+import throttle as th
 from kalshi_client import KalshiClient
 
 DEFAULT_DIR = "data/trades"
-REQUEST_INTERVAL = 0.2
 PAGE_LIMIT = 1000
 MAX_PAGES_PER_MARKET = 200          # 200k trades; nothing is that big
+
+# Measured, not guessed: Kalshi answers these reads in ~10ms and served
+# 50 requests a second with no 429 at all. The old hard-coded 0.2s
+# sleep meant spending 95% of the job asleep -- 4.3 hours for the full
+# weather archive instead of under one.
+#
+# 0.05s is deliberately four times slower than the rate that showed no
+# throttling, because 25 clean requests is not proof of a ceiling. The
+# Throttle widens itself on any 429 and eases back only after a long
+# clean run, so the conservative guess costs little if it is wrong in
+# either direction.
+DEFAULT_INTERVAL = 0.05
+
+# The droplet runs five live collectors. A backfill that fills the disk
+# takes them down, and their data -- unlike this job's -- cannot be
+# re-fetched at any price.
+MIN_FREE_GB = 2.0
 
 
 def fp(value, default=0.0) -> float:
@@ -89,24 +106,8 @@ def mark_done(series: str, ticker: str, directory: str) -> None:
         fh.write(ticker + "\n")
 
 
-def _throttled(fn, *args, **kwargs):
-    delay = 1.0
-    for attempt in range(5):
-        try:
-            out = fn(*args, **kwargs)
-            time.sleep(REQUEST_INTERVAL)
-            return out
-        except Exception as exc:
-            if "404" in str(exc):
-                return None
-            if attempt == 4:
-                raise
-            time.sleep(delay)
-            delay *= 2
-    return None
-
-
-def fetch_trades(kalshi: KalshiClient, ticker: str) -> tuple[list, str]:
+def fetch_trades(kalshi: KalshiClient, ticker: str, pacer: th.Throttle,
+                 guard: th.DiskGuard) -> tuple[list, str]:
     """Every trade for one market. Returns (trades, which_endpoint).
 
     Live first, then historical. An empty live result is NOT proof the
@@ -114,13 +115,13 @@ def fetch_trades(kalshi: KalshiClient, ticker: str) -> tuple[list, str]:
     anything past the cutoff -- so the fallback is unconditional rather
     than triggered by an error.
     """
-    for label, call in (("live", kalshi.get_trades),
-                        ("historical", kalshi.get_historical_trades)):
+    for label, fn in (("live", kalshi.get_trades),
+                      ("historical", kalshi.get_historical_trades)):
         out: list = []
         cursor = None
         for _ in range(MAX_PAGES_PER_MARKET):
-            resp = _throttled(call, ticker=ticker, cursor=cursor,
-                              limit=PAGE_LIMIT)
+            resp = th.call(fn, throttle=pacer, guard=guard, ticker=ticker,
+                           cursor=cursor, limit=PAGE_LIMIT)
             if not resp:
                 break
             batch = resp.get("trades") or []
@@ -134,15 +135,20 @@ def fetch_trades(kalshi: KalshiClient, ticker: str) -> tuple[list, str]:
 
 
 def backfill_series(kalshi: KalshiClient, series: str, directory: str,
-                    max_markets: int | None = None) -> dict:
+                    max_markets: int | None = None,
+                    pacer: th.Throttle | None = None,
+                    guard: th.DiskGuard | None = None) -> dict:
+    pacer = pacer or th.Throttle(interval=DEFAULT_INTERVAL)
+    guard = guard or th.DiskGuard(min_free_gb=MIN_FREE_GB)
     done = load_done(series, directory)
     stats = {"series": series, "markets": 0, "skipped": 0, "trades": 0,
              "contracts": 0.0, "no_trades": 0, "live": 0, "historical": 0}
 
     markets, cursor = [], None
     while True:
-        resp = _throttled(kalshi.get_historical_markets,
-                          series_ticker=series, cursor=cursor, limit=200)
+        resp = th.call(kalshi.get_historical_markets, throttle=pacer,
+                       guard=guard, series_ticker=series, cursor=cursor,
+                       limit=200)
         if not resp:
             break
         batch = resp.get("markets", [])
@@ -167,7 +173,7 @@ def backfill_series(kalshi: KalshiClient, series: str, directory: str,
             mark_done(series, ticker, directory)
             continue
 
-        trades, source = fetch_trades(kalshi, ticker)
+        trades, source = fetch_trades(kalshi, ticker, pacer, guard)
         if not trades:
             stats["no_trades"] += 1
             mark_done(series, ticker, directory)
@@ -217,16 +223,33 @@ def main() -> int:
     p.add_argument("--dir", default=DEFAULT_DIR)
     p.add_argument("--series", action="append", required=True)
     p.add_argument("--max-markets", type=int)
+    p.add_argument("--interval", type=float, default=DEFAULT_INTERVAL,
+                   help="seconds between requests; adapts upward on 429")
+    p.add_argument("--min-free-gb", type=float, default=MIN_FREE_GB,
+                   help="abort if the disk falls below this")
     args = p.parse_args()
 
     kalshi = KalshiClient()
+    pacer = th.Throttle(interval=args.interval)
+    guard = th.DiskGuard(min_free_gb=args.min_free_gb)
+    guard.check(force=True)
+
     print(f"trade backfill: {len(args.series)} series -> {args.dir}/")
+    print(f"  pacing {args.interval:.3f}s ({1/args.interval:.0f} req/s), "
+          f"backs off on 429")
+    print(f"  disk {guard.free_gb:.1f} GB free, aborting below "
+          f"{args.min_free_gb:.1f} GB")
     t0 = time.time()
     grand = {"markets": 0, "trades": 0, "contracts": 0.0, "no_trades": 0}
 
     for series in args.series:
         try:
-            s = backfill_series(kalshi, series, args.dir, args.max_markets)
+            s = backfill_series(kalshi, series, args.dir, args.max_markets,
+                                pacer, guard)
+        except RuntimeError as exc:
+            # The disk guard. Stop the whole job, not just this series.
+            print(f"\n  ABORTED: {exc}")
+            break
         except Exception as exc:
             print(f"  {series:<22} FAILED {type(exc).__name__}: {exc}")
             continue
@@ -239,9 +262,12 @@ def main() -> int:
               f"[live {s['live']}, hist {s['historical']}] "
               f"{s['bytes']/1048576:>6.1f} MB")
 
+    mins = (time.time() - t0) / 60
     print(f"\n{grand['markets']:,} markets, {grand['trades']:,} trades, "
-          f"{grand['contracts']:,.0f} contracts in "
-          f"{(time.time()-t0)/60:.1f} min")
+          f"{grand['contracts']:,.0f} contracts in {mins:.1f} min")
+    print(f"  {pacer.requests:,} requests, {pacer.throttles} throttled, "
+          f"final pacing {pacer.interval:.3f}s")
+    print(f"  disk {guard.free_gb:.1f} GB free")
     return 0
 
 
