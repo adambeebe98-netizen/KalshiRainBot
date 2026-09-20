@@ -122,7 +122,34 @@ AMBIGUOUS_PROPS = (
     "KXEPLGOAL",
 )
 
-EXTRA_SERIES = DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT + AMBIGUOUS_PROPS
+# The highest-volume families on the exchange, ranked on SETTLED history
+# by volume per market rather than by count -- count is how weather
+# looked promising and was not. For scale, the 22,000-market parlay
+# series that tops the raw count trades 867 per market:
+#
+#   KXNBAGAME     4,035,993 per market      KXWNBAGAME    679,929
+#   KXNCAAFGAME   2,147,871                 KXNHLGAME     509,911
+#   KXATPMATCH      797,362                 KXWTAMATCH    459,802
+#
+# These are already being backfilled. Collecting them LIVE is a separate
+# and more urgent thing: a settled market's price history can be fetched
+# whenever, but the book as it stood this minute cannot. NCAAF is in
+# season now and basketball and hockey start next month.
+HIGH_VOLUME = (
+    "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL",
+    "KXNHLGAME",
+    "KXNCAAFGAME",
+    "KXWNBAGAME",
+    # No ESPN ground truth -- its tennis scoreboard lists tournaments
+    # rather than matches, and it does not cover esports. Collected for
+    # price and outcome, which is still worth having at this volume.
+    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+    "KXITFMATCH", "KXITFWMATCH",
+    "KXCS2GAME", "KXLOLGAME", "KXVALORANTGAME",
+)
+
+EXTRA_SERIES = (DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT + AMBIGUOUS_PROPS
+                + HIGH_VOLUME + ("KXMAMDANIMENTION",))
 
 # Settlement rules, written once per ticker to a gzipped file rather
 # than to a snapshot column. The text is static for a market's whole
