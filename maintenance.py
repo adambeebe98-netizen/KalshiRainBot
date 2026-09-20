@@ -151,6 +151,47 @@ def refresh_observations(days_back: int = 3, db_path: str | None = None) -> dict
     return {"inserted": inserted, "days": days_back, "failures": failures}
 
 
+def refresh_forecasts(days_back: int = 3, db_path: str | None = None) -> dict:
+    """Top up archived forecasts from Open-Meteo for every station in use.
+
+    THIS WAS NEVER SCHEDULED. forecast_archive.py has no CLI -- it is a
+    library, run once by a backfill driver -- so wx_forecasts stopped
+    growing the day that backfill finished and nothing noticed. The
+    table looked healthy at 17,784 rows and a steady 1,368 a day right
+    up to the day it died.
+
+    That matters because the forecast is the leg that says what was
+    KNOWABLE IN ADVANCE. Observations say what happened and prices say
+    what the market thought; without the forecast there is no way to
+    ask whether the market was slow to price something already public.
+
+    A rolling few days rather than only yesterday: Open-Meteo's
+    previous-runs endpoint lags, and re-fetching is free because
+    store_forecasts de-duplicates.
+    """
+    import datetime as dt
+    import forecast_archive
+    import weather_archive
+
+    end = dt.date.today()
+    start = end - dt.timedelta(days=days_back)
+    inserted = fetched = 0
+    failures = []
+    for station in weather_archive.stations_in_use(db_path):
+        try:
+            out = forecast_archive.backfill_station(
+                station, start, end, db_path=db_path, sleep_between=1.0)
+            if out.get("error"):
+                failures.append(f"{station}: {out['error']}")
+                continue
+            inserted += out.get("inserted", 0)
+            fetched += out.get("fetched", 0)
+        except Exception as exc:
+            failures.append(f"{station}: {type(exc).__name__}")
+    return {"inserted": inserted, "fetched": fetched,
+            "days": days_back, "failures": failures}
+
+
 def checkpoint_wal(db_path: str | None = None) -> dict:
     conn = _connect(db_path)
     try:
@@ -198,6 +239,7 @@ def main() -> int:
     parser.add_argument("--keep-days", type=int, default=DEFAULT_DECISION_KEEP_DAYS)
     parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--refresh-observations", action="store_true")
+    parser.add_argument("--refresh-forecasts", action="store_true")
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
 
@@ -205,6 +247,9 @@ def main() -> int:
     if args.refresh_observations or args.all:
         print("\ntopping up observed weather from IEM...")
         print(" ", refresh_observations())
+    if args.refresh_forecasts or args.all:
+        print("\ntopping up archived forecasts from Open-Meteo...")
+        print(" ", refresh_forecasts())
     if args.archive_legacy or args.all:
         print("\narchiving legacy raw messages...")
         print(" ", archive_legacy_raw_json())

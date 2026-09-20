@@ -145,6 +145,115 @@ class Revisions(unittest.TestCase):
                          "a line that moves is the signal")
 
 
+class StatePersistence(unittest.TestCase):
+    """Without this, a restart rewrites every play of every live game.
+
+    Measured over one day with several restarts: 16,420 plays had more
+    than one stored version and 15,640 of those differed in NOTHING.
+    That is pure duplication, and it also makes any later count of
+    "how often does the official record change" meaningless.
+    """
+
+    def setUp(self):
+        self.payload = _summary_payload([_play("1", "Single to left")])
+        self._real_get = sports_truth._get
+        sports_truth._get = lambda path, **kw: self.payload
+
+    def tearDown(self):
+        sports_truth._get = self._real_get
+
+    def test_state_round_trips(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = {"plays_seen": {"mlb:E1": {"p1": "abc"}},
+                     "game_state": {"mlb:E1": {"boxscore": "def"}},
+                     "board_seen": {"mlb:E1": "ghi"},
+                     "finished_at": {"E1": 1700000000}}
+            sports_truth.save_state(state, d)
+            back = sports_truth.load_state(d)
+            self.assertEqual(back["plays_seen"], state["plays_seen"])
+            self.assertEqual(back["game_state"], state["game_state"])
+            self.assertEqual(back["finished_at"], {"E1": 1700000000})
+
+    def test_a_restart_does_not_rewrite_the_same_plays(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = sports_truth.load_state(d)
+            batch = sports_truth.summary(
+                "mlb", "E1", first.setdefault("plays_seen", {}).setdefault(
+                    "mlb:E1", {}),
+                first.setdefault("game_state", {}).setdefault("mlb:E1", {}))
+            self.assertEqual(len(batch["play"]), 1)
+            sports_truth.save_state(first, d)
+
+            # Service restarts: fresh process, state read from disk.
+            second = sports_truth.load_state(d)
+            batch2 = sports_truth.summary(
+                "mlb", "E1", second["plays_seen"]["mlb:E1"],
+                second["game_state"]["mlb:E1"])
+            self.assertEqual(batch2["play"], [],
+                             "a restart re-recorded plays it already had")
+
+    def test_missing_state_file_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(sports_truth.load_state(d), {})
+
+    def test_corrupt_state_file_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, sports_truth.STATE_FILE), "w") as fh:
+                fh.write("{not json")
+            self.assertEqual(sports_truth.load_state(d), {})
+
+    def test_prune_keeps_the_most_recent_games(self):
+        state = {
+            "plays_seen": {f"mlb:E{i}": {} for i in range(10)},
+            "game_state": {f"mlb:E{i}": {} for i in range(10)},
+            "finished_at": {f"E{i}": 1000 + i for i in range(10)},
+        }
+        sports_truth.prune_state(state, keep_events=4)
+        self.assertEqual(len(state["plays_seen"]), 4)
+        # Oldest finish times go first.
+        self.assertIn("mlb:E9", state["plays_seen"])
+        self.assertNotIn("mlb:E0", state["plays_seen"])
+
+
+class WallclockNotInDigest(unittest.TestCase):
+    """ESPN revises wallclock constantly and it is not the record.
+
+    612 of 778 flagged revisions in one day differed ONLY in wallclock.
+    Counting those makes the flag 8-to-1 noise.
+    """
+
+    def setUp(self):
+        self._real_get = sports_truth._get
+
+    def tearDown(self):
+        sports_truth._get = self._real_get
+
+    def test_a_changed_wallclock_alone_is_not_a_revision(self):
+        payload = _summary_payload([_play("1", "Single to left")])
+        payload["plays"][0]["wallclock"] = "2026-09-19T18:10:24Z"
+        sports_truth._get = lambda path, **kw: payload
+        seen, gstate = {}, {}
+        sports_truth.summary("mlb", "E1", seen, gstate)
+
+        payload["plays"][0]["wallclock"] = "2026-09-19T18:11:48Z"
+        batch = sports_truth.summary("mlb", "E1", seen, gstate)
+        self.assertEqual(batch["play"], [],
+                         "a nudged timestamp is not the record changing")
+
+    def test_a_changed_type_still_is_a_revision(self):
+        payload = _summary_payload([_play("1", "Shot")])
+        sports_truth._get = lambda path, **kw: payload
+        seen, gstate = {}, {}
+        sports_truth.summary("mlb", "E1", seen, gstate)
+
+        # The real NHL case: 'Missed' reclassified as 'Shot'.
+        payload["plays"][0]["type"] = {"text": "Missed"}
+        payload["plays"][0]["wallclock"] = "2026-09-19T19:00:00Z"
+        batch = sports_truth.summary("mlb", "E1", seen, gstate)
+        self.assertEqual(len(batch["play"]), 1)
+        self.assertTrue(batch["play"][0]["revision"])
+
+
 class Writing(unittest.TestCase):
 
     def test_write_round_trips_as_gzipped_jsonl(self):

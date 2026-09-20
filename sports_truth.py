@@ -73,6 +73,24 @@ LEAGUES = {
     "seriea": "soccer/ita.1",
     "bundesliga": "soccer/ger.1",
     "ligue1": "soccer/fra.1",
+    # Added to match the collector, which was expanded to NBA, WNBA,
+    # NHL and NCAAF markets while this list was left at seven. That gap
+    # is the expensive kind: their PRICE history can be backfilled at
+    # any time, and the ground truth alongside it -- what was known, and
+    # when -- cannot. College football is in season now; basketball and
+    # hockey start next month.
+    #
+    # Capability differs and is recorded rather than assumed:
+    #   nba/wnba/ncaab  timed plays and win probability
+    #   nhl             timed plays, NO win probability
+    #   ncaaf           the site API returns ZERO plays, exactly like
+    #                   the NFL, so its live plays are thin here too;
+    #                   backfill_espn_core.py covers it after the fact
+    "nba": "basketball/nba",
+    "wnba": "basketball/wnba",
+    "nhl": "hockey/nhl",
+    "ncaaf": "football/college-football",
+    "ncaab": "basketball/mens-college-basketball",
 }
 
 SCOREBOARD_SECONDS = 60      # cheap call, run every cycle
@@ -83,6 +101,82 @@ FINISHED_GRACE_SECONDS = 7200  # keep polling after "Final" -- see below
 # httpx's default happily, which is the opposite of the usual advice.
 # Sending nothing special is both what works and what is honest.
 _client = httpx.Client(timeout=30.0, follow_redirects=True)
+
+
+STATE_FILE = "sports_truth_state.json"
+
+
+def load_state(directory: str = DEFAULT_DIR) -> dict:
+    """Digests seen so far, carried across restarts.
+
+    WITHOUT THIS, every restart rewrites every play of every game still
+    in scope, because the in-memory digest map starts empty. Measured
+    over one day with several restarts: 16,420 plays had more than one
+    stored version and 15,640 of those differed in NOTHING -- pure
+    duplication from restarts, inflating the archive and polluting any
+    later count of how often the record actually changes.
+
+    A missing or corrupt state file is not fatal: the service starts
+    with an empty map and re-records, which is the old behaviour rather
+    than a new failure.
+    """
+    path = os.path.join(directory, STATE_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {
+        "plays_seen": saved.get("plays_seen", {}),
+        "game_state": saved.get("game_state", {}),
+        "board_seen": saved.get("board_seen", {}),
+        "finished_at": {k: int(v) for k, v
+                        in (saved.get("finished_at") or {}).items()},
+        "last_summary": {},   # timing only; safe to forget
+    }
+
+
+def save_state(state: dict, directory: str = DEFAULT_DIR) -> None:
+    """Write the digest map, atomically.
+
+    A half-written state file read on the next boot would look like a
+    game nobody had seen, so write beside the target and rename.
+    """
+    path = os.path.join(directory, STATE_FILE)
+    tmp = path + ".writing"
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({
+                "plays_seen": state.get("plays_seen", {}),
+                "game_state": state.get("game_state", {}),
+                "board_seen": state.get("board_seen", {}),
+                "finished_at": state.get("finished_at", {}),
+            }, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        # Losing the state costs duplicate rows on the next restart.
+        # Losing the CYCLE would cost live data, which is worse.
+        log.warning("could not save state (non-fatal): %s", exc)
+
+
+def prune_state(state: dict, keep_events: int = 400) -> None:
+    """Forget games that aged out, so the file does not grow forever.
+
+    Keyed by the same "league:event" the rest of the state uses, and
+    trimmed oldest-first by when the game was seen finishing.
+    """
+    plays_seen = state.get("plays_seen", {})
+    if len(plays_seen) <= keep_events:
+        return
+    finished = state.get("finished_at", {})
+
+    def age(key: str) -> int:
+        return finished.get(key.split(":", 1)[-1], 0)
+
+    for key in sorted(plays_seen, key=age)[:len(plays_seen) - keep_events]:
+        plays_seen.pop(key, None)
+        state.get("game_state", {}).pop(key, None)
 
 
 def _now() -> int:
@@ -202,7 +296,19 @@ def summary(league: str, event_id: str, seen: dict,
             "athletes": [a.get("athlete", {}).get("id")
                          for a in (p.get("participants") or [])],
         }
-        digest = _digest(core)
+        # WALLCLOCK IS EXCLUDED FROM THE DIGEST, deliberately. ESPN
+        # revises it constantly -- filling in a null, nudging a
+        # timestamp by a minute -- and it is not the official record
+        # changing. Measured over one day of live collection: 778 plays
+        # were flagged as revised, of which 612 differed ONLY in
+        # wallclock and 72 touched the record. Including it makes the
+        # revision flag 8-to-1 noise and buries the signal the whole
+        # service exists to catch.
+        #
+        # The value is still STORED; it is simply not what makes a play
+        # count as revised.
+        digest = _digest({k: v for k, v in core.items()
+                          if k != "wallclock"})
         previous = seen.get(pid)
         if previous == digest:
             continue
@@ -369,7 +475,12 @@ def main() -> int:
     # One INFO line per request is ~60 lines a cycle, every minute,
     # forever. The cycle summary says everything the log needs to.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    state: dict = {}
+
+    state = load_state(args.dir)
+    if state.get("plays_seen"):
+        log.info("resumed: %d games already recorded",
+                 len(state["plays_seen"]))
+
     while True:
         t0 = time.time()
         try:
@@ -378,9 +489,12 @@ def main() -> int:
                      "winprob=%d odds=%d box=%d (%.1fs)",
                      c["scoreboard"], c["games"], c["play"], c["revision"],
                      c["winprob"], c["odds"], c["boxscore"], time.time() - t0)
+            prune_state(state)
+            save_state(state, args.dir)
         except Exception:
             log.exception("cycle failed")
         if args.once:
+            save_state(state, args.dir)
             return 0
         time.sleep(max(5, args.interval - (time.time() - t0)))
 
