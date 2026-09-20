@@ -147,6 +147,15 @@ SERIES_LEAGUE = {
     "KXLALIGAGAME": "laliga", "KXLALIGATOTAL": "laliga",
     "KXSERIEAGAME": "seriea", "KXSERIEATOTAL": "seriea",
     "KXBUNDESLIGAGAME": "bundesliga", "KXLIGUE1GAME": "ligue1",
+    "KXNBAGAME": "nba", "KXNBASPREAD": "nba", "KXNBATOTAL": "nba",
+    "KXWNBAGAME": "wnba", "KXWNBAPTS": "wnba", "KXWNBAREB": "wnba",
+    "KXNHLGAME": "nhl",
+    "KXNCAAFGAME": "ncaaf",
+    # Tennis and esports have no ESPN counterpart -- ESPN's tennis
+    # scoreboard lists TOURNAMENTS, not matches, and it does not cover
+    # esports at all. Deliberately absent so fixture_for() does not
+    # imply a join that cannot be made; those series carry price and
+    # outcome only.
 }
 
 # Kept for callers that predate league scoping. NFL only, because that

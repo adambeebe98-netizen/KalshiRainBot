@@ -49,6 +49,21 @@ LEAGUES = {
     "seriea": "soccer/ita.1",
     "bundesliga": "soccer/ger.1",
     "ligue1": "soccer/fra.1",
+    # Added with the high-volume Kalshi expansion. Each was probed
+    # before inclusion, and they are NOT equally capable:
+    #
+    #   nba    506 timed plays, 506 win-prob points -- full support
+    #   ncaab  447 timed plays, 446 win-prob points
+    #   wnba   345 timed plays, 345 win-prob points
+    #   nhl    299 timed plays, NO win probability -- score and clock
+    #          only, which still settles spread and total markets
+    #   ncaaf  site API returns ZERO plays, exactly like the NFL; its
+    #          play data comes from backfill_espn_core.py instead
+    "nba": "basketball/nba",
+    "wnba": "basketball/wnba",
+    "nhl": "hockey/nhl",
+    "ncaaf": "football/college-football",
+    "ncaab": "basketball/mens-college-basketball",
 }
 
 REQUEST_INTERVAL = 0.2

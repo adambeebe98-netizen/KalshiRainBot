@@ -68,7 +68,51 @@ AMBIGUOUS_SETTLEMENT = (
     "KXEPLFIRSTGOAL", "KXLALIGAFIRSTGOAL", "KXEPLGOAL", "KXLALIGAGOAL",
 )
 
-ALL_SERIES = DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT
+# Added after surveying settled history across the exchange by VOLUME
+# PER MARKET, which is the figure that decides whether a family is worth
+# collecting. Total count is how weather looked good and was not: the
+# raw settled-market ranking is topped by a 22,000-market parlay series
+# trading 867 per market, while these trade hundreds of thousands.
+#
+#   KXNBAGAME     2,892 settled   4,035,993 per market
+#   KXNCAAFGAME   1,872 settled   2,147,871
+#   KXATPMATCH    4,812+ CAPPED     797,362
+#   KXWNBAGAME    1,004 settled     679,929
+#   KXNHLGAME     3,074 settled     509,911
+#
+# Several probes hit their page cap, so these counts are floors.
+#
+# ESPN ground truth was checked before committing to any of them:
+# NBA, WNBA and NCAAB return fully timed play-by-play with win
+# probability; NCAAF needs the core API exactly as NFL does; NHL gives
+# plays but no win probability, so it is score-and-clock only. Tennis
+# returns TOURNAMENTS rather than matches and has no play data at all --
+# it is included for price and outcome, with no third leg, and that
+# limit is recorded rather than discovered later.
+HIGH_VOLUME_EXPANSION = (
+    "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL",
+    "KXNHLGAME",
+    "KXNCAAFGAME",
+    "KXWNBAGAME",
+    # No ESPN ground truth; collected for price and outcome only.
+    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+    "KXITFMATCH", "KXITFWMATCH",
+    # Esports. ESPN does not cover these either.
+    "KXCS2GAME", "KXLOLGAME", "KXVALORANTGAME",
+)
+
+# One more "mention" family for the settlement thesis: whether specific
+# words were said, adjudicated by a human reading a transcript.
+AMBIGUOUS_SETTLEMENT_EXTRA = ("KXMAMDANIMENTION",)
+
+ALL_SERIES = (DEEP_AND_LIQUID + AMBIGUOUS_SETTLEMENT
+              + HIGH_VOLUME_EXPANSION + AMBIGUOUS_SETTLEMENT_EXTRA)
+
+# What a second, concurrent run should take. The per-series done-markers
+# make separate series independent, so this can run alongside a backfill
+# already working through ALL_SERIES without either treading on the
+# other.
+EXPANSION = HIGH_VOLUME_EXPANSION + AMBIGUOUS_SETTLEMENT_EXTRA
 
 # Kalshi publishes no read limit this code can rely on, so pace rather
 # than discover one. ~4 requests/second with a backoff on failure.
@@ -270,7 +314,8 @@ def main() -> int:
                    help="limit to these series (repeatable)")
     p.add_argument("--max-markets", type=int,
                    help="cap per series -- use for a costed trial run")
-    p.add_argument("--group", choices=["all", "liquid", "ambiguous"],
+    p.add_argument("--group",
+                   choices=["all", "liquid", "ambiguous", "expansion"],
                    default="all")
     args = p.parse_args()
 
@@ -280,6 +325,8 @@ def main() -> int:
         series_list = list(DEEP_AND_LIQUID)
     elif args.group == "ambiguous":
         series_list = list(AMBIGUOUS_SETTLEMENT)
+    elif args.group == "expansion":
+        series_list = list(EXPANSION)
     else:
         series_list = list(ALL_SERIES)
 

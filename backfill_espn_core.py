@@ -62,9 +62,15 @@ DEFAULT_DIR = "data/espn_core"
 # that plainly had games.
 LEAGUES = {
     "nfl": "football/nfl",
+    # College football has the SAME gap as the NFL: its site-API summary
+    # returns zero plays for a finished game while the core API returns
+    # 156 with 154 carrying wallclock, plus probabilities with
+    # spreadCoverProbHome and totalOverProb.
+    "ncaaf": "football/college-football",
 }
 CORE_LEAGUES = {
     "nfl": "football/leagues/nfl",
+    "ncaaf": "football/leagues/college-football",
 }
 
 REQUEST_INTERVAL = 0.2
